@@ -69,9 +69,16 @@
       padding: clamp(5px, 2vw, 8px) 10px;
       margin-bottom: 8px;
       word-break: break-all;
+      white-space: pre-line;
       min-height: 1.6em;
       display: flex;
       align-items: center;
+    }
+
+    #twb_file_label.status-warning {
+      color: #8a5a00;
+      background: #fff8e6;
+      border-color: #f0d9a8;
     }
 
     #export_status {
@@ -224,9 +231,9 @@
     Previously it was in <head> which caused getElementById to return null
     for every element, making all buttons non-functional.
   -->
-  <script src="./excel_chart_writer.js?v=20261001-6"></script>
-  <script src="./visual_chart_model.js?v=20261001-6"></script>
-  <script src="./build_table_copy.js?v=20261001-6"></script>
+  <script src="./excel_chart_writer.js?v=20261002-1"></script>
+  <script src="./visual_chart_model.js?v=20261002-1"></script>
+  <script src="./build_table_copy.js?v=20261002-1"></script>
 
 </body>
 

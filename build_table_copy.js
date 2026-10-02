@@ -127,8 +127,14 @@ const VISUAL_TYPES = Object.freeze({
   AREA: "AREA",
   PIE: "PIE",
   SCATTER: "SCATTER",
+  BUBBLE: "BUBBLE",
   COMBO: "COMBO",
+  HISTOGRAM: "HISTOGRAM",
+  TREEMAP: "TREEMAP",
+  WATERFALL: "WATERFALL",
+  BOXPLOT: "BOXPLOT",
   MAP: "MAP",
+  MAP_FILLED: "MAP_FILLED",
   GANTT: "GANTT",
   CUSTOM: "CUSTOM",
   UNKNOWN: "UNKNOWN"
@@ -433,12 +439,19 @@ function parseTableauFormatting(xmlString) {
         style: tfParseStyle(tfKid(p, "style"))
       });
     });
+    // Analytics pane box plot: <reference-line formula='iqr' boxplot-whisker-type='…'>
+    sheet.boxPlot = Array.from(ws.getElementsByTagName("reference-line")).some(rl =>
+      rl.getAttribute("formula") === "iqr" || rl.getAttribute("boxplot-whisker-type") != null);
     // every field the sheet references (for name matching incl. Measure Names)
     const seen = new Set();
     const add = r => { if (r && !seen.has(r.inner.toLowerCase())) { seen.add(r.inner.toLowerCase()); sheet.fieldRefs.push(r); } };
+    sheet.runningTotals = [];                                    // waterfall: running-sum table calcs
     Array.from(ws.getElementsByTagName("column-instance")).forEach(ci => {
       const depDs = ci.parentNode && ci.parentNode.getAttribute && ci.parentNode.getAttribute("datasource");
-      add(tfParseFieldRef((depDs ? "[" + depDs + "]." : "") + ci.getAttribute("name")));
+      const ref = tfParseFieldRef((depDs ? "[" + depDs + "]." : "") + ci.getAttribute("name"));
+      add(ref);
+      const calc = tfKid(ci, "table-calc");
+      if (ref && calc && /^(cumtotal|runningtotal)$/i.test(calc.getAttribute("type") || "")) sheet.runningTotals.push(ref);
     });
     sheet.rows.forEach(add); sheet.cols.forEach(add);
     sheet.panes.forEach(p => p.encodings.forEach(e => add(e.field)));
@@ -891,6 +904,30 @@ function tfNaturalCompare(a, b) {
   return tfDvText(a).localeCompare(tfDvText(b), undefined, { numeric: true, sensitivity: "base" });
 }
 
+/* does the loaded workbook belong to the running dashboard? (a different or stale .twb would
+ * silently apply the wrong titles, colours and sorts) → { level: "ok" | "partial" | "mismatch", … } */
+function checkWorkbookMatch(model, dashboard) {
+  if (!model || !dashboard) return null;
+  const names = (dashboard.worksheets || []).map(w => w.name);
+  const known = new Set(Object.keys(model.sheets || {}).map(tfNorm));
+  const missing = names.filter(n => !known.has(tfNorm(n)));
+  const matched = names.length - missing.length;
+  const dashboardFound = Object.keys(model.dashboards || {}).some(d => tfNorm(d) === tfNorm(dashboard.name));
+  const level = !missing.length && dashboardFound ? "ok"
+    : names.length && matched / names.length >= 0.5 ? "partial" : "mismatch";
+  return { level, dashboard: dashboard.name, dashboardFound, matched, total: names.length, missing };
+}
+function describeWorkbookMatch(match) {
+  if (!match || match.level === "ok") return "";
+  const parts = [];
+  if (!match.dashboardFound) parts.push(`dashboard "${match.dashboard}" is not in this workbook`);
+  if (match.missing.length) {
+    parts.push(`${match.matched}/${match.total} worksheets found` +
+      ` (missing: ${match.missing.slice(0, 3).join(", ")}${match.missing.length > 3 ? ", …" : ""})`);
+  }
+  return (match.level === "mismatch" ? "⚠ Wrong workbook? " : "⚠ Workbook partly matches: ") + parts.join("; ");
+}
+
 function isKPIViewModel(vm) {
   const vis = vm.order.map(i => vm.cols[i]);
   return vm.rows.length === 1 && vis.length >= 1 && vis.length <= 8 && !vis.some(c => c.isHeader);
@@ -934,15 +971,42 @@ function tvIsMeasureRef(model, ref) {
   return !(info.role === "dimension" && /^date/i.test(info.datatype || ""));
 }
 
-/* what the TWB shelves say about the view: value axes, continuous dimension axes, geography */
+/* what the TWB shelves say about the view: value axes, continuous dimension axes, geography,
+ * and the evidence for treemaps, histograms, waterfalls and box plots */
 function visualShelfShape(sheet, model) {
   if (!sheet) return null;
   const measures = shelf => sheet[shelf].filter(r => tvIsMeasureRef(model, r)).length;
   const contDim = shelf => sheet[shelf].some(r => r.type === "qk" && !tvIsMeasureRef(model, r));
+  const all = [...sheet.rows, ...sheet.cols];
+  const encoded = channel => sheet.panes.some(p => p.encodings.some(e => e.channel === channel));
+  const datatype = r => String((tfFieldInfo(model, r) || {}).datatype || "");
   return {
     rowMeasures: measures("rows"), colMeasures: measures("cols"),
     continuousDimension: contDim("rows") || contDim("cols"),
-    geo: [...sheet.rows, ...sheet.cols].some(r => /^(latitude|longitude)( \(generated\))?$/i.test(r.name))
+    geo: all.some(r => /^(latitude|longitude)( \(generated\))?$/i.test(r.name)),
+    filled: encoded("geometry"),
+    shelfFields: all.filter(r => r.name !== "Measure Names").length,
+    size: encoded("size"),
+    binned: all.some(r => /\(bin\)$/i.test(r.name)),
+    countAxis: all.some(r => tvIsMeasureRef(model, r) && /^(cnt|ctd)$/i.test(r.deriv || "")),
+    numericDiscreteDim: all.some(r => r.type === "ok" && !TV_DATE_DERIVS.has(String(r.deriv || "").toLowerCase()) &&
+                                      /^(integer|real)$/i.test(datatype(r))),
+    runningTotal: all.some(r => /^(cum|rsum)$/i.test(r.deriv || "") ||
+                                (sheet.runningTotals || []).some(t => tfSameField(t, r))),
+    boxPlot: !!sheet.boxPlot
+  };
+}
+
+/* the same evidence from the live visual specification (no workbook loaded) */
+function liveSpecShape(spec) {
+  if (!spec || typeof spec !== "object" || !(Array.isArray(spec.rowFields) || Array.isArray(spec.columnFields))) return null;
+  const name = f => String(f == null ? "" : typeof f === "string" ? f : (f.name || f.fieldName || f.caption || ""));
+  const shelf = [...(spec.rowFields || []), ...(spec.columnFields || [])].filter(f => !/^measure names$/i.test(name(f)));
+  const encodings = (spec.marksSpecifications || []).flatMap(m => (m && m.encodings) || []);
+  return {
+    shelfFields: shelf.length,
+    size: encodings.some(e => /^size$/i.test(String(e.type || e.encodingType || ""))),
+    binned: shelf.some(f => /\(bin\)$/i.test(name(f)))
   };
 }
 
@@ -968,19 +1032,34 @@ function resolveVisualMarks(spec, vm, model) {
 
 function classifyVisualType(spec, vm, model) {
   const { tokens, shape } = resolveVisualMarks(spec, vm, model);
+  const live = liveSpecShape(spec);
   const axes = shape ? shape.rowMeasures + shape.colMeasures : null;     // null → unknown (no workbook)
+  const token = tokens[0] || "";
+  // generated lat/long on the shelves: a map whatever the mark (circle → symbol map)
+  if (shape && shape.geo) {
+    return shape.filled || tokens.some(t => t === "multipolygon" || t === "polygon") ? VISUAL_TYPES.MAP_FILLED : VISUAL_TYPES.MAP;
+  }
   const cartesian = tokens.filter(t => t === "bar" || t === "line" || t === "area");
   if (new Set(cartesian).size > 1) return VISUAL_TYPES.COMBO;
-  const token = tokens[0] || "";
+  if (token === "ganttbar" || token === "gantt") {
+    return shape && shape.runningTotal ? VISUAL_TYPES.WATERFALL : VISUAL_TYPES.GANTT;
+  }
+  if (shape && shape.boxPlot && axes > 0) return VISUAL_TYPES.BOXPLOT;
   const byMark = {
     bar: VISUAL_TYPES.BAR, line: VISUAL_TYPES.LINE, area: VISUAL_TYPES.AREA, pie: VISUAL_TYPES.PIE,
-    map: VISUAL_TYPES.MAP, multipolygon: VISUAL_TYPES.MAP, polygon: VISUAL_TYPES.MAP,
+    map: VISUAL_TYPES.MAP, multipolygon: VISUAL_TYPES.MAP_FILLED, polygon: VISUAL_TYPES.MAP_FILLED,
     heatmap: VISUAL_TYPES.MAP, density: VISUAL_TYPES.MAP,               // density marks: Tableau-only visual
-    ganttbar: VISUAL_TYPES.GANTT, gantt: VISUAL_TYPES.GANTT, vizextension: VISUAL_TYPES.CUSTOM
+    vizextension: VISUAL_TYPES.CUSTOM
   };
   if (token === "bar" && axes === 0) return isKPIViewModel(vm) ? VISUAL_TYPES.KPI : VISUAL_TYPES.TABLE;
+  if (token === "bar" && ((shape && (shape.binned || (shape.countAxis && shape.numericDiscreteDim))) || (live && live.binned))) {
+    return VISUAL_TYPES.HISTOGRAM;
+  }
   if (byMark[token]) return byMark[token];
   if (token === "circle" || token === "shape" || token === "square") {
+    // nothing on Rows/Columns + Size → Tableau lays the marks out itself: treemap / packed bubbles
+    const free = shape ? shape.shelfFields === 0 && shape.size : live ? live.shelfFields === 0 && live.size : false;
+    if (free) return token === "square" ? VISUAL_TYPES.TREEMAP : VISUAL_TYPES.BUBBLE;
     if (axes === null) return token === "circle" ? VISUAL_TYPES.SCATTER : VISUAL_TYPES.TABLE;
     if (shape.rowMeasures && shape.colMeasures) return VISUAL_TYPES.SCATTER;
     if (axes > 0) return VISUAL_TYPES.LINE;                              // dot plot: markers on one axis
@@ -1008,6 +1087,7 @@ function buildVisualModel(model, sheetName, summary, opts = {}) {
     style: spec && (spec.style || spec.styles) || {},
     layout: opts.layout || null,
     source: { visualSpec: spec },
+    formatModel: model || null,
     metadata: {
       worksheetName: sheetName,
       markClass: vm.fmt && vm.fmt.colorEncoding ? ((vm.fmt.colorEncoding() || {}).markClass || null) : null,
@@ -1049,74 +1129,187 @@ const VISUAL_RENDERERS = Object.freeze({
   image: Object.freeze({ renderer: "tableau-image", status: "pending", reason: "Tableau image renderer selected" }),
   cellTypes: new Set([VISUAL_TYPES.TABLE, VISUAL_TYPES.KPI, VISUAL_TYPES.HEATMAP]),
   chartTypes: new Set([VISUAL_TYPES.BAR, VISUAL_TYPES.COLUMN, VISUAL_TYPES.LINE, VISUAL_TYPES.AREA,
-                       VISUAL_TYPES.PIE, VISUAL_TYPES.SCATTER, VISUAL_TYPES.COMBO]),
-  imageTypes: new Set([VISUAL_TYPES.BAR, VISUAL_TYPES.LINE, VISUAL_TYPES.AREA, VISUAL_TYPES.PIE, VISUAL_TYPES.SCATTER, VISUAL_TYPES.MAP]),
+                       VISUAL_TYPES.PIE, VISUAL_TYPES.SCATTER, VISUAL_TYPES.COMBO, VISUAL_TYPES.HISTOGRAM,
+                       VISUAL_TYPES.WATERFALL, VISUAL_TYPES.BOXPLOT, VISUAL_TYPES.GANTT, VISUAL_TYPES.TREEMAP]),
+  // createVizImageAsync draws bar / line / area / square / circle / text marks only
+  // (no pie, gantt or polygon marks); a symbol map is drawn as circles on lat/long without a basemap
+  imageTypes: new Set([VISUAL_TYPES.BAR, VISUAL_TYPES.COLUMN, VISUAL_TYPES.LINE, VISUAL_TYPES.AREA, VISUAL_TYPES.SCATTER,
+                       VISUAL_TYPES.COMBO, VISUAL_TYPES.HISTOGRAM, VISUAL_TYPES.TREEMAP, VISUAL_TYPES.BUBBLE, VISUAL_TYPES.MAP]),
   fallback: Object.freeze({ renderer: "data-fallback", status: "warning", reason: "visual renderer not implemented yet" })
 });
 
-function visualDataValue(dv) {
-  if (tfIsNull(dv)) return null;
-  return dv.nativeValue !== undefined ? dv.nativeValue : dv.value;
-}
+/* createVizImageAsync input spec, built from the same field roles as the native charts
+ * (tvRoles in visual_chart_model.js): real shelves, colour, size, labels and view order.
+ * One value axis → v1 spec; several measures (combo / dual axis, Measure Values) → v2 spec.
+ * The API draws bar / line / area / square / circle / text marks only and has one field per
+ * shelf and no Detail channel, so several category levels are joined into one ordered field. */
+const VIZ_IMAGE_DISCRETE_PALETTES = new Set(["tableau10_10_0", "tableau20_10_0", "color_blind_10_0", "seattle_grays_10_0",
+  "traffic_light_10_0", "superfishel_stone_10_0", "miller_stone_10_0", "nuriel_stone_10_0", "jewel_bright_10_0", "summer_10_0",
+  "winter_10_0", "green_orange_cyan_yellow_10_0", "blue_red_brown_10_0", "purple_pink_gray_10_0", "tableau-10",
+  "tableau-10-medium", "tableau-20", "cyclic_10_0"]);
+const VIZ_IMAGE_ORDER_FIELD = "__order";
 
 function buildVizImageSpec(visualModel, width, height) {
   const vm = visualModel.viewModel;
-  // all columns: chart axes measures are not "visible" table columns in the view model
-  const visibleColumns = vm.cols;
-  const values = vm.rows.map(row => {
-    const value = {};
-    visibleColumns.forEach((column, position) => {
-      value[column.name || `Field${position + 1}`] = visualDataValue(row[position]);
-    });
-    return value;
-  });
-  const dimensions = vm.cols.filter(c => c.isHeader);
-  const measures = vm.cols.filter(c => !c.isHeader && (c.pivoted || /^(int|float|real|integer|number)/i.test(String(c.dataType || ""))));
-  const dimension = dimensions[0] || visibleColumns[0];
-  const numericMeasures = measures.length ? measures : visibleColumns.filter(column => !column.isHeader);
-  const firstMeasure = numericMeasures[0] || visibleColumns[1];
-  const secondMeasure = numericMeasures[1] || null;
-  const latitude = visibleColumns.find(column => /^(latitude|generated latitude)$/i.test(column.name) || /latitude/i.test(column.name));
-  const longitude = visibleColumns.find(column => /^(longitude|generated longitude)$/i.test(column.name) || /longitude/i.test(column.name));
-  if (visualModel.type === VISUAL_TYPES.MAP && (!latitude || !longitude)) {
-    throw new Error("The map has no usable latitude and longitude mapping");
-  }
-  if (!dimension || !firstMeasure) throw new Error("The visual has no usable dimension and measure mapping");
+  const T = VISUAL_TYPES;
+  const type = visualModel.type;
+  if (!vm || !vm.rows.length) throw new Error("visual has no data rows");
+  const roles = tvRoles(vm, visualModel.formatModel, visualModel.source && visualModel.source.visualSpec);
+  const markToken = visualModel.metadata.markToken || "";
+  const numericCol = c => c.pivoted || /^(int|float|real|integer|number|double)/i.test(String(c.dataType || ""));
 
-  const mark = {
-    [VISUAL_TYPES.BAR]: "bar",
-    [VISUAL_TYPES.LINE]: "line",
-    [VISUAL_TYPES.AREA]: "area",
-    [VISUAL_TYPES.PIE]: "pie",
-    [VISUAL_TYPES.SCATTER]: "circle",
-    [VISUAL_TYPES.MAP]: "map"
-  }[visualModel.type];
-  let encoding;
-  if (visualModel.type === VISUAL_TYPES.MAP) {
-    encoding = { columns: { field: longitude.name, type: "continuous" }, rows: { field: latitude.name, type: "continuous" } };
-  } else if (visualModel.type === VISUAL_TYPES.SCATTER && secondMeasure) {
-    encoding = { columns: { field: firstMeasure.name, type: "continuous" }, rows: { field: secondMeasure.name, type: "continuous" } };
-  } else if (visualModel.type === VISUAL_TYPES.PIE) {
-    encoding = { color: { field: dimension.name, type: "discrete" }, angle: { field: firstMeasure.name, type: "continuous" } };
-  } else {
-    encoding = { columns: { field: dimension.name, type: "discrete" }, rows: { field: firstMeasure.name, type: "continuous" } };
-  }
-  const color = dimensions[1];
-  if (visualModel.type === VISUAL_TYPES.MAP) {
-    const mapColor = dimensions.find(column => column.name !== latitude.name && column.name !== longitude.name);
-    if (mapColor) encoding.color = { field: mapColor.name, type: "discrete", palette: "tableau20_10_0" };
-  } else if (color && color.name !== dimension.name && visualModel.type !== VISUAL_TYPES.PIE) {
-    encoding.color = { field: color.name, type: "discrete", palette: "tableau20_10_0" };
-  }
-  return {
-    version: 2,
-    description: visualModel.title && visualModel.title.text || visualModel.metadata.worksheetName,
-    size: { width, height },
-    data: { values },
-    mark,
-    markcolor: "#4E79A7",
-    encoding
+  // readable, unique field names
+  const taken = new Set([VIZ_IMAGE_ORDER_FIELD, "__mark"]);
+  const keys = vm.cols.map((c, i) => {
+    let k = String(c.label || c.name || `Field${i + 1}`);
+    while (taken.has(k)) k += " ";
+    taken.add(k);
+    return k;
+  });
+  const kinds = new Map();                                   // column → "discrete" | "continuous"
+  const field = (ci, continuous, extra) => {
+    kinds.set(ci, continuous ? "continuous" : "discrete");
+    return { field: keys[ci], type: continuous ? "continuous" : "discrete", ...extra };
   };
+  const title = ci => tvMeasureLabel(vm, ci);
+
+  // colour: TWB palette / mapping → named discrete palette or custom gradient end points
+  let color = null;
+  if (roles.color && !roles.color.measureNames && roles.color.ci >= 0) {
+    const ci = roles.color.ci;
+    if (roles.color.continuous) {
+      const scale = tvColorScale(vm, roles, markToken);
+      const nums = vm.rows.map(r => tfDvNum(r[ci])).filter(n => n !== null);
+      if (scale && nums.length) {
+        const min = Math.min(...nums), max = Math.max(...nums);
+        color = min < 0 && max > 0
+          ? field(ci, true, { palette: "custom-diverging", start: "#" + scale(min), end: "#" + scale(max) })
+          : field(ci, true, { palette: "custom-sequential", end: "#" + scale(max) });
+      } else color = field(ci, true);
+    } else {
+      const enc = visualModel.formatModel && vm.fmt.colorEncoding ? vm.fmt.colorEncoding() : null;
+      const named = enc && enc.def && enc.def.paletteName;
+      color = field(ci, false, { palette: VIZ_IMAGE_DISCRETE_PALETTES.has(named) ? named : "tableau10_10_0" });
+    }
+  }
+  const sizeField = roles.size >= 0 ? field(roles.size, true) : null;
+  const labelDim = roles.textDims[0] ?? roles.detailDims[0] ?? -1;
+  /* No Detail channel: without a per-mark field Tableau would aggregate the marks (a scatter of
+   * customers collapses to one point per colour). Label them; with many marks the label is an
+   * invisible zero-width key so the marks stay separate without covering the chart. */
+  const synthetic = {};
+  const markLabel = ci => {
+    const distinct = new Set(vm.rows.map(r => tvText(r[ci])));
+    if (distinct.size <= 40 || roles.textDims.includes(ci)) return field(ci, false);
+    const index = new Map([...distinct].map((v, i) => [v, i]));
+    synthetic.__mark = row => index.get(tvText(row[ci])).toString(2).replace(/0/g, "​").replace(/1/g, "‌");
+    return { field: "__mark", type: "discrete" };
+  };
+
+  let spec = null, categoryKey = null, categoryOf = null;
+  const base = {
+    description: (visualModel.title && visualModel.title.text) || visualModel.metadata.worksheetName,
+    markcolor: "#" + tvMarkColor(roles)
+  };
+
+  if (type === T.MAP) {
+    const lat = vm.cols.findIndex(c => /latitude/i.test(c.name));
+    const lon = vm.cols.findIndex(c => /longitude/i.test(c.name));
+    if (lat < 0 || lon < 0) throw new Error("the map has no latitude/longitude in its summary data");
+    const encoding = { columns: field(lon, true, { hidden: true }), rows: field(lat, true, { hidden: true }) };
+    if (color) encoding.color = color;
+    if (sizeField) encoding.size = sizeField;
+    const place = roles.detailDims.find(ci => ci !== lat && ci !== lon);
+    if (place !== undefined) encoding.text = markLabel(place);
+    spec = { ...base, mark: "circle", encoding };
+  } else if (type === T.TREEMAP || type === T.BUBBLE) {
+    if (roles.size < 0 || labelDim < 0) throw new Error("no Size measure and label dimension to lay out the marks");
+    const encoding = { size: sizeField, text: field(labelDim, false) };
+    if (color) encoding.color = color;
+    spec = { ...base, mark: type === T.TREEMAP ? "square" : "circle", encoding };
+  } else if (type === T.SCATTER) {
+    const xm = roles.cols.values[0], ym = roles.rows.values[0];
+    if (!xm || !ym) throw new Error("scatter needs a measure on Rows and on Columns");
+    const encoding = { columns: field(xm.ci, true, { title: title(xm.ci) }), rows: field(ym.ci, true, { title: title(ym.ci) }) };
+    if (color) encoding.color = color;
+    if (sizeField) encoding.size = sizeField;
+    if (labelDim >= 0) encoding.text = markLabel(labelDim);
+    spec = { ...base, mark: "circle", encoding };
+  } else {
+    // bar / line / area / histogram / combo: one ordered category field + one or more value axes
+    const valueShelf = roles.rows.values.length ? "rows" : roles.cols.values.length ? "cols" : null;
+    if (!valueShelf) throw new Error("no continuous measure axis to draw");
+    const catShelf = valueShelf === "rows" ? "cols" : "rows";
+    const measures = roles[valueShelf].values;
+    const catCis = [...roles[catShelf].dims, ...roles[valueShelf].dims].map(d => d.ci);
+    if (catCis.length) {
+      const order = new Map();
+      categoryOf = row => catCis.map(ci => tvText(row[ci])).join(" · ");
+      vm.rows.forEach(r => { const k = categoryOf(r); if (!order.has(k)) order.set(k, order.size); });
+      if (catCis.some(ci => /^date/i.test(String(vm.cols[ci].dataType || "")))) {
+        const firstRow = new Map();
+        vm.rows.forEach(r => { const k = categoryOf(r); if (!firstRow.has(k)) firstRow.set(k, r); });
+        const sorted = [...order.keys()].sort((a, b) => {
+          for (const ci of catCis) { const d = tfNaturalCompare(firstRow.get(a)[ci], firstRow.get(b)[ci]); if (d) return d; }
+          return 0;
+        });
+        order.clear();
+        sorted.forEach((k, i) => order.set(k, i));
+      }
+      categoryKey = { name: catCis.map(ci => keys[ci]).join(" · "), order };
+    }
+    const catField = categoryKey ? { field: categoryKey.name, type: "discrete" } : null;
+    const markOf = token => token === "line" ? "line" : token === "area" ? "area"
+      : /^(circle|shape)$/.test(token) ? "circle" : token === "square" ? "square" : "bar";
+    const shelfName = s => s === "cols" ? "columns" : "rows";
+    if (measures.length === 1) {
+      const m = measures[0];
+      const encoding = {
+        [shelfName(valueShelf)]: field(m.ci, true, { title: title(m.ci) }),
+        sort: catField ? { field: categoryKey.name, sortby: VIZ_IMAGE_ORDER_FIELD, direction: "ascending" } : undefined
+      };
+      if (catField) encoding[shelfName(catShelf)] = catField;
+      if (color) encoding.color = color;
+      if (sizeField) encoding.size = sizeField;
+      if (labelDim >= 0 && !catCis.includes(labelDim)) encoding.text = markLabel(labelDim);
+      if (!encoding.sort) delete encoding.sort;
+      spec = { ...base, mark: markOf(tvMeasureMark(roles, m.ref, markToken)), encoding };
+    } else {
+      const marks = measures.map((m, i) => markOf(tvMeasureMark(roles, m.ref, markToken, i, measures.length)));
+      measures.forEach(m => field(m.ci, true));
+      spec = {
+        version: 2,
+        description: base.description,
+        vizlayout: { size: { width, height }, showcolorlegend: !!color },
+        [shelfName(catShelf)]: catField ? [catField] : [],
+        [shelfName(valueShelf)]: measures.map(m => ({ field: keys[m.ci], type: "continuous", title: title(m.ci) })),
+        encodingaxis: shelfName(valueShelf),
+        defaultencoding: { mark: marks[0] },
+        encodings: marks.map(mark => (color ? { mark, color } : { mark }))
+      };
+    }
+  }
+  if (!spec.version) spec.size = { width, height };
+
+  // data: every encoded column + the joined category and its order helper
+  const perCategory = new Map();
+  if (categoryKey) vm.rows.forEach(r => { const k = categoryOf(r); perCategory.set(k, (perCategory.get(k) || 0) + 1); });
+  spec.data = {
+    values: vm.rows.map(row => {
+      const out = {};
+      kinds.forEach((kind, ci) => {
+        out[keys[ci]] = kind === "continuous" ? tfDvNum(row[ci]) : tvText(row[ci]);
+      });
+      for (const name in synthetic) out[name] = synthetic[name](row);
+      if (categoryKey) {
+        const k = categoryOf(row);
+        out[categoryKey.name] = k;
+        out[VIZ_IMAGE_ORDER_FIELD] = categoryKey.order.get(k) / perCategory.get(k);   // SUM over the category = its rank
+      }
+      return out;
+    })
+  };
+  return spec;
 }
 
 function svgToPngDataUrl(svg, width, height) {
@@ -1630,6 +1823,7 @@ if (typeof module !== "undefined" && module.exports) {  // lets you unit-test th
   module.exports = { parseTableauFormatting, createSheetFormatter, tfBuildColorScale, tableauToExcelNumFmt,
     inferExcelNumFmt, tfWriteCell, tfExcelFont, tfArgb, tfParseFieldRef, buildVisualModel,
     classifyVisualType, resolveVisualMarks, tvIsMeasureRef, chooseVisualRenderer, buildVizImageSpec,
+    checkWorkbookMatch, describeWorkbookMatch,
     VISUAL_TYPES, VISUAL_RENDERERS, FORMAT_CONFIG, TABLEAU_DEFAULTS };
 }
 
@@ -1722,9 +1916,27 @@ if (typeof module !== "undefined" && module.exports) {  // lets you unit-test th
     };
   }
 
-  function updateVisualStatus(statuses) {
+  /* loaded-workbook label, with a warning when the file does not match this dashboard */
+  function showWorkbookLabel(fileName, details, model) {
+    const label = document.getElementById("twb_file_label");
+    if (!label) return;
+    const match = checkWorkbookMatch(model, tableau.extensions.dashboardContent.dashboard);
+    const warning = describeWorkbookMatch(match);
+    label.textContent = `${warning ? "" : "✅ "}${fileName} — ${details}` + (warning ? `\n${warning}` : "");
+    label.title = match && match.missing.length ? "Not found in the workbook:\n" + match.missing.join("\n") : "";
+    label.classList.toggle("status-warning", !!warning);
+    if (warning) console.warn("[Workbook]", warning, match);
+  }
+
+  function updateVisualStatus(statuses, note) {
     const target = document.getElementById("export_status");
     if (!target) return;
+    if (note) {                                      // e.g. the loaded workbook does not match
+      updateVisualStatus(statuses);
+      target.textContent = note + " · " + target.textContent;
+      target.classList.add("status-warning");
+      return;
+    }
     if (!statuses || !statuses.length) {
       target.textContent = "No worksheet visual status available";
       return;
@@ -2302,12 +2514,9 @@ if (typeof module !== "undefined" && module.exports) {  // lets you unit-test th
             console.warn("[loadWorkbookFile] settings.saveAsync failed (model kept in memory):", e.message);
           }
 
-          const fileLabel = document.getElementById("twb_file_label");
-          if (fileLabel) {
-            const sheetCount = Object.keys(formatModel.sheets).length;
-            const colorCount = Object.values(formatModel.sheets).filter(s => s.panes.some(p => p.encodings.some(e => e.channel === "color"))).length;
-            fileLabel.textContent = `✅ ${file.name} — ${Object.keys(titleMap).length} titles, formatting for ${sheetCount} sheets (${colorCount} with colour)`;
-          }
+          const sheetCount = Object.keys(formatModel.sheets).length;
+          const colorCount = Object.values(formatModel.sheets).filter(s => s.panes.some(p => p.encodings.some(e => e.channel === "color"))).length;
+          showWorkbookLabel(file.name, `${Object.keys(titleMap).length} titles, formatting for ${sheetCount} sheets (${colorCount} with colour)`, formatModel);
 
 
           resolve(titleMap);
@@ -2764,8 +2973,9 @@ if (typeof module !== "undefined" && module.exports) {  // lets you unit-test th
         const savedFormat = tableau.extensions.settings.get("twbFormatModel");
         if (savedFileName && savedTitleMap) {
           const titleCount = Object.keys(JSON.parse(savedTitleMap)).length;
-          const sheetCount = savedFormat ? Object.keys(JSON.parse(savedFormat).sheets || {}).length : 0;
-          fileLabel.textContent = `✅ ${savedFileName} — ${titleCount} titles, formatting for ${sheetCount} sheets`;
+          const savedModel = savedFormat ? JSON.parse(savedFormat) : null;
+          const sheetCount = savedModel ? Object.keys(savedModel.sheets || {}).length : 0;
+          showWorkbookLabel(savedFileName, `${titleCount} titles, formatting for ${sheetCount} sheets`, savedModel);
         } else {
           fileLabel.textContent = "No workbook loaded — click 📁 to load titles and colors";
         }
@@ -2789,6 +2999,8 @@ if (typeof module !== "undefined" && module.exports) {  // lets you unit-test th
 
     const fmtModel = getFormatModel();
     console.log(`[Export] Format model: ${fmtModel ? Object.keys(fmtModel.sheets).length + " sheets" : "none – load the workbook for exact formatting"}`);
+    const workbookWarning = describeWorkbookMatch(checkWorkbookMatch(fmtModel, dashboard));
+    if (workbookWarning) console.warn("[Export]", workbookWarning);
 
     const layoutMap = buildLayoutMap(dashboard.objects || [], titleMap);
 
@@ -2954,7 +3166,7 @@ if (typeof module !== "undefined" && module.exports) {  // lets you unit-test th
     }
 
     console.table(visualStatuses);
-    updateVisualStatus(visualStatuses);
+    updateVisualStatus(visualStatuses, workbookWarning);
 
     const placedItems = allItems.map((item, idx) => {
       if (item.layout) {
@@ -3124,7 +3336,8 @@ while (FORMAT_CONFIG.groupOverflowRows && snapChanged && snapPass < MAX_SNAP_PAS
           });
           reserveGraphicBlock(item);
           item.visualModel.status = "success";
-          item.visualModel.statusReason = "Tableau SVG rendered and embedded as PNG";
+          item.visualModel.statusReason = "Tableau SVG rendered and embedded as PNG" +
+            (item.visualModel.type === VISUAL_TYPES.MAP ? " (marks on latitude/longitude, no basemap)" : "");
           if (status) {
             status.status = "success";
             status.reason = item.visualModel.statusReason;
@@ -3162,7 +3375,7 @@ while (FORMAT_CONFIG.groupOverflowRows && snapChanged && snapPass < MAX_SNAP_PAS
       }
     }
 
-    updateVisualStatus(visualStatuses);
+    updateVisualStatus(visualStatuses, workbookWarning);
 
     setColumnWidths(worksheet, colWidths, exactWidths);
     applyAutoFilters(worksheet, allTablesInfo);
@@ -3188,7 +3401,7 @@ while (FORMAT_CONFIG.groupOverflowRows && snapChanged && snapPass < MAX_SNAP_PAS
           const status = visualStatuses.find(entry => entry.worksheet === job.item.name);
           if (status) { status.status = "warning"; status.reason = `chart injection failed: ${err.message}`; }
         });
-        updateVisualStatus(visualStatuses);
+        updateVisualStatus(visualStatuses, workbookWarning);
       }
     }
     const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
