@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "extension",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "http.server", "5500", "--bind", "127.0.0.1", "--directory", "D:\\PBI\\Custom VIsual\\Export_extension_XML"],
+      "port": 5500
+    }
+  ]
+}

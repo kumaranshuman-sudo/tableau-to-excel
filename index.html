@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Mark2Table - Excel Export</title>
+
+  <!-- jQuery -->
+  <script src="https://code.jquery.com/jquery-3.2.1.min.js"></script>
+
+  <!-- Bootstrap -->
+  <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap.min.css">
+  <script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/js/bootstrap.min.js"></script>
+
+  <!-- Tableau Extensions Library -->
+  <script src="./js/tableau.extensions.1.latest.js"></script>
+
+  <!-- ExcelJS Library -->
+  <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
+
+  <!-- JSZip Library - reads .twbx files in the browser for title extraction -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+
+  <style>
+    :root {
+      --ink: #1c2b26;
+      --ink-soft: #5b6b65;
+      --line: #dfe6e2;
+      --surface: #f6f8f7;
+      --green: #1c7a4d;
+      --green-deep: #145d3b;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+    }
+
+    body {
+      padding: clamp(8px, 5%, 16px);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: clamp(11px, 3vw, 13px);
+      color: var(--ink);
+      background: #ffffff;
+      line-height: 1.4;
+    }
+
+    .container-fluid { padding: 0; width: 100%; }
+
+    .section-title {
+      font-size: 0.85em;
+      font-weight: 600;
+      color: var(--ink-soft);
+      margin-bottom: 5px;
+    }
+
+    #twb_file_label {
+      font-size: 0.9em;
+      color: var(--ink-soft);
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: clamp(5px, 2vw, 8px) 10px;
+      margin-bottom: 8px;
+      word-break: break-all;
+      min-height: 1.6em;
+      display: flex;
+      align-items: center;
+    }
+
+    #export_status {
+      font-size: 0.85em;
+      color: var(--ink-soft);
+      margin-top: 8px;
+      min-height: 1.4em;
+    }
+
+    #export_status.status-warning { color: #8a5a00; }
+
+    button { font-family: inherit; }
+
+    .btn-load {
+      background: #ffffff;
+      color: var(--ink);
+      border: 1px solid var(--line);
+      font-size: 0.95em;
+      font-weight: 500;
+      border-radius: 6px;
+      cursor: pointer;
+      padding: clamp(7px, 2.5vw, 9px) 12px;
+      width: 100%;
+      transition: background 0.15s ease, border-color 0.15s ease;
+    }
+    .btn-load:hover { background: var(--surface); border-color: #c7d1cb; }
+    .btn-load:active { background: #edf1ef; }
+    .btn-load:disabled { opacity: 0.55; cursor: not-allowed; }
+
+    hr {
+      border: none;
+      border-top: 1px solid var(--line);
+      margin: clamp(10px, 4vw, 14px) 0;
+    }
+
+    .btn-export {
+      background: var(--green);
+      color: white;
+      border: none;
+      font-size: 1em;
+      font-weight: 600;
+      border-radius: 6px;
+      cursor: pointer;
+      padding: clamp(9px, 3vw, 12px) 16px;
+      width: 100%;
+      letter-spacing: 0.01em;
+      transition: background 0.15s ease, transform 0.05s ease;
+    }
+    .btn-export:hover { background: var(--green-deep); }
+    .btn-export:active { transform: translateY(1px); }
+    .btn-export:disabled { background: #a9b3af; cursor: not-allowed; }
+
+    /* ── Hover tooltip (pure CSS, no markup/JS changes needed) ── */
+    .has-tip { position: relative; }
+
+    .has-tip::after {
+      content: attr(data-tip);
+      position: absolute;
+      bottom: calc(100% + 8px);
+      left: 50%;
+      transform: translate(-50%, 4px);
+      width: max-content;
+      max-width: min(220px, 80vw);
+      background: var(--ink);
+      color: #fff;
+      font-size: 11px;
+      font-weight: 400;
+      line-height: 1.35;
+      text-align: left;
+      white-space: normal;
+      border-radius: 6px;
+      padding: 7px 9px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.18);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.15s ease, transform 0.15s ease;
+      z-index: 10;
+    }
+
+    .has-tip::before {
+      content: "";
+      position: absolute;
+      bottom: 100%;
+      left: 50%;
+      transform: translate(-50%, 2px);
+      border: 5px solid transparent;
+      border-top-color: var(--ink);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.15s ease, transform 0.15s ease;
+      z-index: 10;
+    }
+
+    .has-tip:hover::after,
+    .has-tip:focus-visible::after {
+      opacity: 1;
+      transform: translate(-50%, 0);
+    }
+    .has-tip:hover::before,
+    .has-tip:focus-visible::before {
+      opacity: 1;
+      transform: translate(-50%, 0);
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container-fluid">
+
+    <!-- ── SECTION 1: Load Workbook for Visual Titles ── -->
+    <div class="section-title">Visual Titles (load once)</div>
+
+    <!--
+      This div is updated by build_table_copy.js to show which file
+      is loaded and how many titles were found.
+      id="twb_file_label" must match exactly what the JS expects.
+    -->
+    <div id="twb_file_label">No workbook loaded</div>
+
+    <!--
+      This button triggers the OS file picker.
+      id="load_workbook_btn" must match exactly what the JS expects.
+    -->
+    <button id="load_workbook_btn" class="btn-load">
+      📁 Load Workbook File (.twb / .twbx)
+    </button>
+
+    <hr />
+
+    <!-- ── SECTION 2: Export ── -->
+    <div class="section-title">Export</div>
+    <!--
+      id="export_button" — kept exactly as before, no change.
+      class="has-tip" + data-tip added only for the CSS hover tooltip below;
+      does not affect click handling or any JS lookups.
+    -->
+    <button id="export_button" class="btn-export has-tip" data-tip="If you modify the default filename, add .xlsx at end (example: Marketing.xlsx)">
+      Export All Worksheets to EXCEL
+    </button>
+    <div id="export_status" role="status" aria-live="polite">Visual discovery has not run</div>
+
+  </div>
+
+  <!--
+    IMPORTANT: build_table_copy.js is loaded at the BOTTOM of <body>,
+    NOT in <head>. This ensures the DOM elements above (load_workbook_btn,
+    twb_file_label, export_button) all exist before the JS runs and tries
+    to find them with getElementById.
+
+    Previously it was in <head> which caused getElementById to return null
+    for every element, making all buttons non-functional.
+  -->
+  <script src="./excel_chart_writer.js?v=20261001-6"></script>
+  <script src="./visual_chart_model.js?v=20261001-6"></script>
+  <script src="./build_table_copy.js?v=20261001-6"></script>
+
+</body>
+
+</html>
