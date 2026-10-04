@@ -1,16 +1,17 @@
-"use strict";
-/* Loads the extension scripts into a sandbox and runs every worksheet of the
+/* Imports the extension modules (src/testing.js) and runs every worksheet of the
  * sample workbook (plus synthetic waterfall / box plot sheets) through
  * classify → renderer → chart spec / image spec, on synthetic Superstore data.
  *   node tests/harness.js                  → table + check against EXPECTED (exit 1 on mismatch)
  *   node tests/harness.js xlsx <file>      → also writes an XLSX with every native chart
  *   node tests/harness.js json "<sheet>" [image] → dump one sheet's chart / image spec
  * tests/run.ps1 runs the check, builds the XLSX and opens it in Excel. */
-const fs = require("fs");
-const path = require("path");
-const vm = require("vm");
-const { DOMParser, JSZip, writeZip } = require("./shims");
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import shims from "./shims.js";
 
+const { DOMParser, writeZip } = shims;
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
 
 /* sheet → [visual type, renderer, native chart kind or image mark] */
@@ -41,24 +42,13 @@ const EXPECTED = {
   "Box Plot": ["BOXPLOT", "excel-chart", "line"],
   "Tree Map (Automatic)": ["TREEMAP", "excel-chart", "treemap"]
 };
-const ctx = {
-  console: { log() {}, warn() {}, error: console.error, info() {} },
-  DOMParser, JSZip,
-  document: { addEventListener() {}, getElementById() { return null; } },
-  tableau: { extensions: { createVizImageAsync() {} } },
-  window: {}, setTimeout, Blob: class {}, URL: {}, Image: class {}
-};
-vm.createContext(ctx);
-for (const f of ["excel_chart_writer.js", "visual_chart_model.js", "build_table_copy.js"]) {
-  // top-level const/let are script-scoped; re-export what the harness needs onto globalThis
-  const src = fs.readFileSync(path.join(ROOT, f), "utf8");
-  vm.runInContext(src + "\n;globalThis.__x = Object.assign(globalThis.__x || {}, {" +
-    (f === "excel_chart_writer.js" ? "ExcelChartWriter" :
-     f === "visual_chart_model.js" ? "buildExcelChartSpecs" :
-     "parseTableauFormatting, buildVisualModel, chooseVisualRenderer, imageOrFallback, buildVizImageSpec, VISUAL_TYPES, FORMAT_CONFIG" +
-     (src.includes("function checkWorkbookMatch") ? ", checkWorkbookMatch" : "")) + "});", ctx, { filename: f });
-}
-const X = ctx.__x;
+// the modules read browser globals at call time; the parser needs a DOMParser
+globalThis.DOMParser = DOMParser;
+globalThis.tableau = { extensions: { createVizImageAsync() {} } };
+// keep the extension's own logging out of the test output
+const print = console.log.bind(console);
+console.log = console.warn = console.info = () => {};
+const X = await import(pathToFileURL(path.join(ROOT, "src", "testing.js")).href);
 const model = X.parseTableauFormatting(fs.readFileSync(path.join(ROOT, "test_workbooks", "Visual Gallery.twb.xml"), "utf8"));
 
 // sheets the sample lacks: waterfall (Gantt + running total) and box plot (Circle View + Analytics box plot)
@@ -197,8 +187,8 @@ if (mode === "json") {
   const pick = process.argv[3];
   const r = results.find(x => x.name === pick);
   if (!r.image) { try { r.image = X.buildVizImageSpec(r.visual, 480, 300); } catch (e) { r.err = (r.err || "") + " | image spec: " + e.message; } }
-  if (process.argv[4] === "image") { console.log(r.err || "", JSON.stringify(r.image && { ...r.image, data: { n: r.image.data.values.length, first: r.image.data.values.slice(0, 2) } })); return; }
-  console.log(JSON.stringify({ type: r.visual.type, decision: r.decision, err: r.err, image: r.image && { ...r.image, data: { values: r.image.data.values.slice(0, 3) } },
+  if (process.argv[4] === "image") print(r.err || "", JSON.stringify(r.image && { ...r.image, data: { n: r.image.data.values.length, first: r.image.data.values.slice(0, 2) } }));
+  else print(JSON.stringify({ type: r.visual.type, decision: r.decision, err: r.err, image: r.image && { ...r.image, data: { values: r.image.data.values.slice(0, 3) } },
     specs: r.specs && r.specs.map(s => ({ ...s, series: s.series.map(x => ({ ...x, values: x.values && x.values.slice(0, 6), x: x.x && x.x.slice(0, 3), y: x.y && x.y.slice(0, 3) })) })) }, null, 1));
 } else {
   const failures = [];
@@ -209,17 +199,17 @@ if (mode === "json") {
     const want = EXPECTED[r.name];
     const ok = want && want.every((w, i) => w === got[i]);
     if (!ok) failures.push(`${r.name}: expected ${want ? want.join(" / ") : "(no expectation)"}, got ${got.join(" / ")}`);
-    console.log(`${ok ? "ok  " : "FAIL"} ${r.name.padEnd(30)} ${got[0].padEnd(10)} ${got[1].padEnd(14)} ${got[2].padEnd(14)} ${r.err || ""}`);
+    print(`${ok ? "ok  " : "FAIL"} ${r.name.padEnd(30)} ${got[0].padEnd(10)} ${got[1].padEnd(14)} ${got[2].padEnd(14)} ${r.err || ""}`);
   }
   const good = X.checkWorkbookMatch(model, { name: "Visual Gallery", worksheets: Object.keys(SHEETS).map(name => ({ name })) });
   const wrong = X.checkWorkbookMatch(model, { name: "Sales Overview", worksheets: [{ name: "Sales by Region" }, { name: "Vertical Bar" }, { name: "Profit Trend" }] });
   if (good.level !== "ok") failures.push(`workbook match: expected ok for the right workbook, got ${good.level}`);
   if (wrong.level !== "mismatch") failures.push(`workbook match: expected mismatch for a wrong workbook, got ${wrong.level}`);
-  console.log(`\nworkbook match: right file → ${good.level}, wrong file → ${wrong.level}`);
+  print(`\nworkbook match: right file → ${good.level}, wrong file → ${wrong.level}`);
   if (failures.length) {
     console.error(`\n${failures.length} check(s) failed:\n  ` + failures.join("\n  "));
     process.exitCode = 1;
-  } else console.log(`\nall ${results.length} sheets classified and rendered as expected`);
+  } else print(`\nall ${results.length} sheets classified and rendered as expected`);
 }
 
 /* ── XLSX with every native chart, for checking in real Excel ─────────────── */
@@ -262,6 +252,6 @@ if (mode === "xlsx") {
   X.ExcelChartWriter.injectCharts(writeZip(pkg), { sheetIndex: 0, charts: jobs }).then(buf => {
     fs.writeFileSync(out, Buffer.from(buf));
     fs.writeFileSync(out + ".names.txt", jobs.map(j => j.name).join("\n"));
-    console.log(`\nwrote ${out} with ${jobs.length} charts`);
+    print(`\nwrote ${out} with ${jobs.length} charts`);
   });
 }

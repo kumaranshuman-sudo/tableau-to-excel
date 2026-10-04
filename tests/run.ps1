@@ -6,7 +6,7 @@ $here = $PSScriptRoot
 $out = Join-Path $here "out"
 New-Item -ItemType Directory -Force $out | Out-Null
 
-node (Join-Path $here "harness.js") xlsx (Join-Path $out "charts.xlsx")
+node (Join-Path $here "harness.mjs") xlsx (Join-Path $out "charts.xlsx")
 if ($LASTEXITCODE -ne 0) { Write-Host "Classification check failed." -ForegroundColor Red; exit 1 }
 
 $result = & (Join-Path $here "excel_check.ps1") -File (Join-Path $out "charts.xlsx") -OutDir (Join-Path $out "png")

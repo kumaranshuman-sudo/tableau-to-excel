@@ -8,21 +8,8 @@
 
   <title>Mark2Table - Excel Export</title>
 
-  <!-- jQuery -->
-  <script src="https://code.jquery.com/jquery-3.2.1.min.js"></script>
-
-  <!-- Bootstrap -->
-  <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap.min.css">
-  <script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/js/bootstrap.min.js"></script>
-
   <!-- Tableau Extensions Library -->
   <script src="./js/tableau.extensions.1.latest.js"></script>
-
-  <!-- ExcelJS Library -->
-  <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
-
-  <!-- JSZip Library - reads .twbx files in the browser for title extraction -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 
   <style>
     :root {
@@ -223,17 +210,11 @@
   </div>
 
   <!--
-    IMPORTANT: build_table_copy.js is loaded at the BOTTOM of <body>,
-    NOT in <head>. This ensures the DOM elements above (load_workbook_btn,
-    twb_file_label, export_button) all exist before the JS runs and tries
-    to find them with getElementById.
-
-    Previously it was in <head> which caused getElementById to return null
-    for every element, making all buttons non-functional.
+    The extension bundle (src/ + ExcelJS + JSZip) is loaded at the end of <body>, after the panel
+    elements it looks up. scripts/build.mjs replaces the placeholder with the content-hashed file
+    name, so Tableau never serves a stale cached copy.
   -->
-  <script src="./excel_chart_writer.js?v=20261004-6"></script>
-  <script src="./visual_chart_model.js?v=20261004-6"></script>
-  <script src="./build_table_copy.js?v=20261004-6"></script>
+  <script src="__BUNDLE__"></script>
 
 </body>
 
