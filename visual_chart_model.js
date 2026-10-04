@@ -38,7 +38,7 @@ function tvPaneRule(pane, element, attrName) {
 /* ── field roles: which summary column sits on which shelf / encoding ───── */
 function tvRoles(vm, model, liveSpec) {
   const sheet = vm.fmt.sheetModel;
-  const roles = { rows: { values: [], dims: [] }, cols: { values: [], dims: [] }, measureNames: null,
+  const roles = { rows: { values: [], dims: [], axisRefs: [] }, cols: { values: [], dims: [], axisRefs: [] }, measureNames: null,
                   color: null, angle: -1, size: -1, textDims: [], detailDims: [],
                   labelRefs: [], labelNames: [], panes: sheet ? sheet.panes : [], source: "none" };
   const addDim = (list, ci) => {
@@ -59,17 +59,18 @@ function tvRoles(vm, model, liveSpec) {
       return i;
     };
     for (const shelf of ["rows", "cols"]) {
-      let mvAxis = 0;                              // dual-axis Measure Values: "MV + MV" → axis 0 and 1
+      let axisNo = 0;                              // each measure / Measure Values entry = one axis ("A + B")
       for (const ref of sheet[shelf]) {
         if (ref.name === "Measure Names") { roles.measureNames = shelf; continue; }
         if (ref.name === "Multiple Values") {
-          const axis = mvAxis++;
+          roles[shelf].axisRefs.push(ref);
+          const axis = axisNo++;
           pivoted.forEach(ci => roles[shelf].values.push({ ci, ref: vm.cols[ci].ref, mv: true, axis }));
           continue;
         }
         const ci = colOf(ref);
         if (ci < 0) continue;
-        if (tvIsMeasureRef(model, ref)) roles[shelf].values.push({ ci, ref });
+        if (tvIsMeasureRef(model, ref)) { roles[shelf].axisRefs.push(ref); roles[shelf].values.push({ ci, ref, axis: axisNo++ }); }
         else roles[shelf].dims.push({ ci, ref, continuous: ref.type === "qk" });
       }
     }
@@ -448,14 +449,69 @@ function tvCartesianSpecs(ctx) {
              categories, categoryTitle, legend: series.length > 1, series, ...extra };
   };
 
+  const axisIds = [...new Set(measures.map(m => m.axis || 0))].sort((a, b) => a - b);
+  const paneOfAxis = k => {
+    const refs = roles[valueShelf].axisRefs || [];
+    const ref = refs[k];
+    if (ref) {
+      const nth = refs.slice(0, k).filter(r => tfSameField(r, ref) || (r.name === ref.name && r.name === "Multiple Values")).length;
+      const axisName = p => (horizontal ? p.xAxisName : p.yAxisName);
+      const hits = roles.panes.filter(p => { const n = axisName(p) && tfParseFieldRef(axisName(p)); return n && (tfSameField(n, ref) || (n.name === "Multiple Values" && ref.name === "Multiple Values")); });
+      if (hits[nth]) return hits[nth];
+    }
+    return roles.panes.find(x => String(x.id) === String(k + 1)) || null;
+  };
+  const paneMarkOfAxis = k => { const p = paneOfAxis(k); return p ? tvMarkToken(p.markClass) : ""; };
+
+  // an axis of custom shapes picked by a field (logos, ▲▼ icons: Shape mark + Shape encoding) is
+  // decoration Excel cannot draw → chart the other measures instead of a meaningless extra series
+  if (axisIds.length > 1) {
+    const decorative = axisIds.filter(k => { const p = paneOfAxis(k); return p && tvMarkToken(p.markClass) === "shape" && p.encodings.some(e => e.channel === "shape"); });
+    if (decorative.length && decorative.length < axisIds.length) {
+      const keep = measures.filter(m => !decorative.includes(m.axis || 0));
+      if (keep.length) { measures.splice(0, measures.length, ...keep); return tvCartesianSpecs({ ...ctx, roles: { ...roles, [valueShelf]: { ...roles[valueShelf], values: keep } } }); }
+    }
+  }
+
+  // the same measure on both axes (styling: line + shape at the points, bar + line, Gantt cap on bars)
+  // → drawn once: bar / area / line wins, a line gets markers when the other pane draws shapes
+  if (!mvMode && axisIds.length > 1 && measures.every(m => m.ci === measures[0].ci)) {
+    const toks = axisIds.map(k => paneMarkOfAxis(k) || sheetMark).filter(Boolean);
+    const primary = ["bar", "area", "line"].find(x => toks.includes(x)) || toks[0] || "bar";
+    const type = { ...tvSeriesType(primary) };
+    if (primary === "line" && toks.some(x => /^(circle|shape|square)$/.test(x))) type.marker = true;
+    const m = measures[0];
+    return [make(seriesFor(m, { type, color: tvMarkColor(roles) }), { numFmt: tvNumFmt(vm, m.ci), valueTitle: tvMeasureLabel(vm, m.ci) })];
+  }
+
+  // a measure on one axis and Measure Values on the other (Sales bars + MV lines) → combo, axis each
+  const groupOf = k => measures.filter(m => (m.axis || 0) === k);
+  const sameSets = axisIds.every(k => { const a = groupOf(k).map(m => m.ci).sort().join(), b = groupOf(axisIds[0]).map(m => m.ci).sort().join(); return a === b; });
+  if (mvMode && axisIds.length > 1 && !sameSets && !mnCategory) {
+    const series = [];
+    axisIds.forEach((k, ai) => {
+      const tok = paneMarkOfAxis(k) || sheetMark;
+      groupOf(k).filter((m, i, a) => a.findIndex(x => x.ci === m.ci) === i).forEach(m => series.push({
+        name: tvMeasureLabel(vm, m.ci), values: tvSum(vm, cats, m.ci), labels: tvLabelsOn(roles, m.ref),
+        color: (color && color.measureNames && scale ? scale(vm.cols[m.ci].name, series.length) : null) || tvHex(TABLEAU_10[series.length % TABLEAU_10.length]),
+        ...tvSeriesType(tok), secondary: axisIds.length === 2 && ai === 1
+      }));
+    });
+    const first = groupOf(axisIds[0])[0], second = groupOf(axisIds[1])[0];
+    const spec = make(series, { numFmt: tvNumFmt(vm, first.ci), valueTitle: groupOf(axisIds[0]).length === 1 ? tvMeasureLabel(vm, first.ci) : "Value",
+                                secondaryNumFmt: tvNumFmt(vm, second.ci), secondaryTitle: groupOf(axisIds[1]).length === 1 ? tvMeasureLabel(vm, second.ci) : "Value" });
+    spec.stacked = false;
+    spec.legend = series.length > 1;
+    return [spec];
+  }
+
   // Measure Values: one chart, one series per measure
   if (mvMode) {
     // dual axis "MV + MV": every measure is listed once per axis, and each axis has its own
     // pane (id 1, 2, …) with its own mark → one entry per measure, marks per axis
     const axisCount = Math.max(...measures.map(m => (m.axis || 0) + 1));
     const axisMarks = Array.from({ length: axisCount }, (_, k) => {
-      const pane = roles.panes.find(p => String(p.id) === String(k + 1));
-      return (axisCount > 1 && pane && tvMarkToken(pane.markClass)) || tvMeasureMark(roles, null, sheetMark);
+      return (axisCount > 1 && paneMarkOfAxis(k)) || tvMeasureMark(roles, null, sheetMark);
     });
     const unique = measures.filter((m, i) => measures.findIndex(x => x.ci === m.ci) === i);
     const markSet = [...new Set(axisMarks.map(t => tvSeriesType(t).marker && tvSeriesType(t).line === false ? "dot" : tvSeriesType(t).type))];

@@ -894,6 +894,17 @@ function tfDvNum(dv) {
   const n = parseFloat(String(v).replace(/[^0-9.\-eE]/g, ""));
   return isFinite(n) && /^[\s$€£¥(+-]*[\d.,]+/.test(String(v)) ? n : null;
 }
+/* discrete date parts arrive as names: "January" / "Jan" / "Monday" → calendar position */
+const TF_MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+const TF_WEEKDAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+function tfCalendarRank(text) {
+  const t = String(text || "").trim().toLowerCase();
+  const m = t.match(/^(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec)$/);
+  if (m) return { kind: "month", rank: TF_MONTHS.indexOf(m[1].slice(0, 3)) };
+  const d = t.match(/^(sunday|monday|tuesday|wednesday|thursday|friday|saturday|sun|mon|tue|wed|thu|fri|sat)$/);
+  if (d) return { kind: "weekday", rank: TF_WEEKDAYS.indexOf(d[1].slice(0, 3)) };
+  return null;
+}
 function tfNaturalCompare(a, b) {
   const an = tfIsNull(a), bn = tfIsNull(b);
   if (an || bn) return an === bn ? 0 : an ? 1 : -1;           // nulls last
@@ -901,6 +912,10 @@ function tfNaturalCompare(a, b) {
   const bv = b.nativeValue !== undefined ? b.nativeValue : b.value;
   if (typeof av === "number" && typeof bv === "number") return av - bv;
   if (av instanceof Date && bv instanceof Date) return av - bv;
+  const iso = /^\d{4}-\d{2}-\d{2}/;
+  if (typeof av === "string" && typeof bv === "string" && iso.test(av) && iso.test(bv)) return av < bv ? -1 : av > bv ? 1 : 0;
+  const ra = tfCalendarRank(tfDvText(a)), rb = tfCalendarRank(tfDvText(b));   // MONTH / WEEKDAY names
+  if (ra !== null && rb !== null && ra.kind === rb.kind) return ra.rank - rb.rank;
   return tfDvText(a).localeCompare(tfDvText(b), undefined, { numeric: true, sensitivity: "base" });
 }
 
@@ -993,7 +1008,11 @@ function visualShelfShape(sheet, model) {
                                       /^(integer|real)$/i.test(datatype(r))),
     runningTotal: all.some(r => /^(cum|rsum)$/i.test(r.deriv || "") ||
                                 (sheet.runningTotals || []).some(t => tfSameField(t, r))),
-    boxPlot: !!sheet.boxPlot
+    boxPlot: !!sheet.boxPlot,
+    // a date on the shelves (discrete MONTH(…) or continuous) → Tableau's Automatic mark is a line
+    dateDimension: all.some(r => !tvIsMeasureRef(model, r) && (TV_DATE_DERIVS.has(String(r.deriv || "").toLowerCase()) ||
+                                                              (/^date/i.test(datatype(r)) && r.type !== "nk"))),
+    shelfDims: all.filter(r => r.name !== "Measure Names" && !tvIsMeasureRef(model, r)).length
   };
 }
 
@@ -1024,7 +1043,7 @@ function resolveVisualMarks(spec, vm, model) {
     source = "automatic";
     if (shape.geo) tokens = ["map"];
     else if (shape.rowMeasures && shape.colMeasures) tokens = ["circle"];
-    else if (shape.rowMeasures || shape.colMeasures) tokens = [shape.continuousDimension ? "line" : "bar"];
+    else if (shape.rowMeasures || shape.colMeasures) tokens = [shape.continuousDimension || shape.dateDimension ? "line" : "bar"];
     else if (shape.shelfFields === 0 && shape.size) tokens = ["square"];   // empty shelves + Size → treemap
     else tokens = ["text"];
   }
@@ -1039,6 +1058,9 @@ function classifyVisualType(spec, vm, model) {
   // generated lat/long on the shelves: a map whatever the mark (circle → symbol map)
   if (shape && shape.geo) {
     return shape.filled || tokens.some(t => t === "multipolygon" || t === "polygon") ? VISUAL_TYPES.MAP_FILLED : VISUAL_TYPES.MAP;
+  }
+  if (tokens.includes("text") && tokens.every(t => /^(text|shape|circle|square)$/.test(t))) {
+    return isKPIViewModel(vm) ? VISUAL_TYPES.KPI : VISUAL_TYPES.TABLE;      // KPI tiles / buttons built from marks
   }
   const cartesian = tokens.filter(t => t === "bar" || t === "line" || t === "area");
   if (new Set(cartesian).size > 1) return VISUAL_TYPES.COMBO;
@@ -2261,7 +2283,7 @@ if (typeof module !== "undefined" && module.exports) {  // lets you unit-test th
   }
 
   /* ── Write Individual Filter Value Table ──────────────────────────────── */
-  function writeIndividualFilterTable(worksheet, filterName, filterValues, originRow, originCol, rangeTracker) {
+  function writeIndividualFilterTable(worksheet, filterName, filterValues, originRow, originCol, rangeTracker, header = "SELECTED VALUE(S)") {
     let r = originRow;
     const C = originCol;
 
@@ -2272,7 +2294,7 @@ if (typeof module !== "undefined" && module.exports) {  // lets you unit-test th
     rangeTracker.update(r, C);
     r++;
 
-    tableHeaderCell(worksheet, r, C, "SELECTED VALUE(S)");
+    tableHeaderCell(worksheet, r, C, header);
     rangeTracker.update(r, C);
     r++;
 
@@ -3356,6 +3378,29 @@ if (typeof module !== "undefined" && module.exports) {  // lets you unit-test th
       }
     }
 
+    // ── parameter controls (e.g. Start Date / End Date): not filters, so read them separately ──
+    try {
+      const params = typeof dashboard.getParametersAsync === "function" ? await dashboard.getParametersAsync() : [];
+      const controls = (dashboard.objects || []).filter(o => o.type === "parameter" && o.isVisible !== false);
+      const used = new Set();
+      const norm = s => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+      params.forEach(param => {
+        let control = controls.find(o => !used.has(o) && norm(o.name) === norm(param.name)) ||
+                      controls.find(o => !used.has(o) && norm(o.name).includes(norm(param.name)));
+        if (!control) return;                                      // parameter not shown on this dashboard
+        used.add(control);
+        const raw = param.currentValue ? (param.currentValue.formattedValue ?? String(param.currentValue.value)) : "";
+        const value = String(raw).replace(/\s+12:00:00\s*AM$|\s+00:00:00$/i, "");   // dates: no midnight time
+        filterValueItems.push({
+          type: "filterValue", isParameter: true, name: param.name, visualName: param.name,
+          filterName: param.name, values: [value], layout: layoutMap.get(control.name), rowCount: 3
+        });
+      });
+      if (params.length) console.log(`[Parameters] ${used.size} of ${params.length} parameters have a control on the dashboard`);
+    } catch (err) {
+      console.warn("[Parameters] could not read parameters:", err.message);
+    }
+
     const allItems = [...filterValueItems, ...dataWorksheetItems];
 
     if (allItems.length === 0) {
@@ -3560,7 +3605,8 @@ while (FORMAT_CONFIG.groupOverflowRows && snapChanged && snapPass < MAX_SNAP_PAS
           item.values,
           item.gridRow,
           item.gridCol,
-          tracker
+          tracker,
+          item.isParameter ? "PARAMETER VALUE" : undefined
         );
         colWidths[item.gridCol] = Math.max(colWidths[item.gridCol] || 0, 35);
       } else if (item.isKPI) {
@@ -3580,15 +3626,18 @@ while (FORMAT_CONFIG.groupOverflowRows && snapChanged && snapPass < MAX_SNAP_PAS
     setExportStatus("Building the Excel file…");
     let buffer = await workbook.xlsx.writeBuffer();
     if (chartJobs.length) {
-      // keep every chart inside its own block now that the final column widths/row heights are known
+      // fit every chart to its own block now that the final column widths/row heights are known:
+      // tables widen the columns, so a chart kept at its Tableau pixel size would end short of the
+      // tables / charts aligned with it on the dashboard → stretch it to the block's edges
       const colPx = ci => Math.floor((worksheet.getColumn(ci + 1).width || 8.43) * 7 + 5);
       const rowPx = ri => { const h = worksheet.getRow(ri + 1).height; return h ? Math.round(h * 4 / 3) : EXCEL_ROW_PX; };
       chartJobs.forEach(job => {
         let w = 0, h = -job.rowOffPx;
         for (let c = job.item.gridCol; c < job.item.gridCol + job.item.gridW; c++) w += colPx(c);
         for (let r = job.row; r < job.item.gridRow + job.item.allocatedRows; r++) h += rowPx(r);
-        job.widthPx = Math.min(job.widthPx, w);
-        job.heightPx = Math.max(60, Math.min(job.heightPx, h));
+        const panes = job.item.visualModel.chartSpecs.length;     // stacked panes share the block height
+        job.widthPx = Math.max(160, w);
+        job.heightPx = Math.max(60, panes > 1 ? Math.min(job.heightPx, h) : h);
       });
       try {
         buffer = await ExcelChartWriter.injectCharts(buffer, { sheetIndex: 0, charts: chartJobs });
