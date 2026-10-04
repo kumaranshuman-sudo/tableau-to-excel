@@ -206,6 +206,40 @@ if (mode === "json") {
   if (good.level !== "ok") failures.push(`workbook match: expected ok for the right workbook, got ${good.level}`);
   if (wrong.level !== "mismatch") failures.push(`workbook match: expected mismatch for a wrong workbook, got ${wrong.level}`);
   print(`\nworkbook match: right file → ${good.level}, wrong file → ${wrong.level}`);
+
+  // dashboard layout → Excel grid
+  const check = (ok, what) => { if (!ok) failures.push("layout: " + what); return ok; };
+  // without snapping "Right" (5 px right of Wide's edge, 8 px lower) would round to column 11 / row 1
+  const objects = [
+    { type: "worksheet", name: "Wide", position: { x: 0, y: 10 }, size: { width: 940, height: 400 } },
+    { type: "worksheet", name: "Right", position: { x: 945, y: 18 }, size: { width: 450, height: 400 } },
+    { type: "filter", name: "Wide", position: { x: 1400, y: 0 }, size: { width: 160, height: 80 } }   // filter named after its sheet
+  ];
+  const map = X.buildLayoutMap(objects);
+  const wide = map.get("Wide"), right = map.get("Right");
+  const layoutOk = [
+    check(wide.widthPx === 940 && wide.gridW === 10, `zone size comes from DashboardObject.size (got ${wide.widthPx}px, ${wide.gridW} cols)`),
+    check(wide.type === "worksheet", "a filter with the worksheet's name must not replace the worksheet's entry"),
+    check(right.gridCol === 10 && right.gridRow === wide.gridRow, `edges a few px apart snap to one grid line (got row ${right.gridRow}, col ${right.gridCol})`),
+    check(X.graphicBox(wide, { showTitle: false }).gridW === 10, "a chart block is as wide as its zone on the grid")
+  ];
+  // a row of blocks moves down as a whole when one of them sits under a tall block
+  const zones = [
+    { name: "tall", gridRow: 0, gridCol: 0, gridW: 4, allocatedRows: 20 },
+    { name: "small", gridRow: 3, gridCol: 8, gridW: 4, allocatedRows: 3 },
+    { name: "under tall", gridRow: 10, gridCol: 0, gridW: 4, allocatedRows: 5 },
+    { name: "under small", gridRow: 10, gridCol: 8, gridW: 4, allocatedRows: 5 }
+  ];
+  X.resolveCollisions(zones);
+  layoutOk.push(check(zones[2].gridRow === zones[3].gridRow && zones[2].gridRow >= 21,
+    `blocks that share a top edge stay level (got rows ${zones[2].gridRow} / ${zones[3].gridRow})`));
+  // a long table keeps the rows a chart beside it uses visible
+  const table = { type: "worksheet", name: "table", gridRow: 0, gridCol: 0, gridW: 4, allocatedRows: 43,
+                  vm: { rows: new Array(40).fill([]), showTitle: true, showHeaderRow: true } };
+  const chart = { type: "worksheet", name: "chart", gridRow: 0, gridCol: 4, gridW: 6, allocatedRows: 20, box: {}, vm: table.vm };
+  X.setTableVisibleRows([table, chart]);
+  layoutOk.push(check(table.visibleRows === 18, `a table beside a chart keeps its rows visible (got ${table.visibleRows})`));
+  print(`layout: ${layoutOk.filter(Boolean).length}/${layoutOk.length} checks passed`);
   if (failures.length) {
     console.error(`\n${failures.length} check(s) failed:\n  ` + failures.join("\n  "));
     process.exitCode = 1;

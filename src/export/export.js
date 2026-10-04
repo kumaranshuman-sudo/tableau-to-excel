@@ -3,7 +3,7 @@ import ExcelJS from "exceljs";
 import { buildExcelChartSpecs } from "../charts/model/index.js";
 import { FORMAT_CONFIG, TABLEAU_DEFAULTS, TF_ELEMENTS, VISUAL_TYPES } from "../config.js";
 import { writeDashboardTitle, writeIndividualFilterTable } from "./cell-writers.js";
-import { CHART_DATA_SHEET, EXCEL_ROW_PX, PX_PER_COL, PX_PER_ROW, ROW_GAP, ROW_GROUP_THRESHOLD, buildLayoutMap, graphicBox, makeRangeTracker, resolveCollisions, viewModelHeight } from "./layout.js";
+import { CHART_DATA_SHEET, EXCEL_ROW_PX, PX_PER_COL, PX_PER_ROW, ROW_GAP, buildLayoutMap, graphicBox, makeRangeTracker, resolveCollisions, setTableVisibleRows, tableDataStart, viewModelHeight } from "./layout.js";
 import { extractFilterValuesPerField, fetchAllSheetsData, isFilterValueWorksheet } from "./sheet-data.js";
 import { applyAutoFilters, setColumnWidths, writeKPICardStacked, writeRegularTable, writeTableauTitle } from "./visual-writers.js";
 import { tfDashboardTitleRuns } from "../twb/dashboard-text.js";
@@ -284,39 +284,36 @@ export async function exportToExcel() {
     resolveCollisions(placedItems);
 
 // SNAP-OUT-OF-GROUPED-ROWS PASS
-// Excel hides entire physical rows, not per-column cells. resolveCollisions
-// only pushes items that horizontally overlap another item's column range —
-// so a table in column K can still be placed on a row that a totally
-// different table (in column A) has marked hidden=true for its own
-// row-grouping. When the workbook opens with that group collapsed, the
-// column-K table vanishes too, even though nothing "collided" by column.
-// This pass detects that and pushes the item below the other table's full
-// physical row range (not just its visible rows).
+// Excel hides entire physical rows, not per-column cells, so a long table's collapsed rows would
+// also hide whatever sits beside it. Charts, images, cards and filter lists that share rows with
+// the table keep those rows visible (setTableVisibleRows); a table that would start inside another
+// table's collapsed rows is pushed below that table's full physical row range.
 let snapChanged = true;
 const MAX_SNAP_PASSES = 10;
 let snapPass = 0;
 
 while (FORMAT_CONFIG.groupOverflowRows && snapChanged && snapPass < MAX_SNAP_PASSES) {
-  snapChanged = false;
-  snapPass++;
+  snapChanged = false;
+  snapPass++;
+  setTableVisibleRows(placedItems);               // charts / cards beside a long table keep its rows visible
 
-  for (const item of placedItems) {
-    for (const other of placedItems) {
-      if (item === other) continue;
+  for (const item of placedItems) {
+    for (const other of placedItems) {
+      if (item === other) continue;
+      if (!other.visibleRows || other.visibleRows >= other.vm.rows.length) continue;  // other hides no rows
 
-      const otherTotal = other.allocatedRows || other.rowCount || 0;
-      if (otherTotal <= ROW_GROUP_THRESHOLD + 2) continue; // other has no hidden rows
+      const otherTotal = other.allocatedRows || other.rowCount || 0;
+      const otherVisibleEnd = tableDataStart(other) + other.visibleRows;               // first hidden row
+      const otherPhysicalEnd = other.gridRow + otherTotal + ROW_GAP;
 
-      const otherVisibleEnd = other.gridRow + ROW_GROUP_THRESHOLD + 3;
-      const otherPhysicalEnd = other.gridRow + otherTotal + ROW_GAP;
-
-      if (item.gridRow >= otherVisibleEnd && item.gridRow < otherPhysicalEnd) {
-        item.gridRow = otherPhysicalEnd;
-        snapChanged = true;
-      }
-    }
-  }
+      if (item.gridRow >= otherVisibleEnd && item.gridRow < otherPhysicalEnd) {
+        item.gridRow = otherPhysicalEnd;
+        snapChanged = true;
+      }
+    }
+  }
 }
+setTableVisibleRows(placedItems);
 
     const workbook = new ExcelJS.Workbook();
     const sheetName = (dashboard.name || "Dashboard Export")
@@ -445,7 +442,7 @@ while (FORMAT_CONFIG.groupOverflowRows && snapChanged && snapPass < MAX_SNAP_PAS
         colWidths[item.gridCol] = Math.max(colWidths[item.gridCol] || 0, 22);
         colWidths[item.gridCol + 1] = Math.max(colWidths[item.gridCol + 1] || 0, 18);
       } else {
-        writeRegularTable(worksheet, item.vm, item.gridRow, item.gridCol, tracker, allTablesInfo, colWidths, exactWidths);
+        writeRegularTable(worksheet, item.vm, item.gridRow, item.gridCol, tracker, allTablesInfo, colWidths, exactWidths, item.visibleRows);
       }
     }
 
@@ -462,7 +459,11 @@ while (FORMAT_CONFIG.groupOverflowRows && snapChanged && snapPass < MAX_SNAP_PAS
       // tables widen the columns, so a chart kept at its Tableau pixel size would end short of the
       // tables / charts aligned with it on the dashboard → stretch it to the block's edges
       const colPx = ci => Math.floor((worksheet.getColumn(ci + 1).width || 8.43) * 7 + 5);
-      const rowPx = ri => { const h = worksheet.getRow(ri + 1).height; return h ? Math.round(h * 4 / 3) : EXCEL_ROW_PX; };
+      const rowPx = ri => {                          // collapsed rows take no space on screen
+        const row = worksheet.getRow(ri + 1);
+        if (row.hidden) return 0;
+        return row.height ? Math.round(row.height * 4 / 3) : EXCEL_ROW_PX;
+      };
       chartJobs.forEach(job => {
         let w = 0, h = -job.rowOffPx;
         for (let c = job.item.gridCol; c < job.item.gridCol + job.item.gridW; c++) w += colPx(c);
@@ -489,7 +490,6 @@ while (FORMAT_CONFIG.groupOverflowRows && snapChanged && snapPass < MAX_SNAP_PAS
       await writable.write(blob);
       await writable.close();
       console.log(`[Export] saved to ${saveTarget.name}`);
-      appendExportStatus(`saved as ${saveTarget.name}`);
     } else {
       const link = document.createElement('a');
       link.href = URL.createObjectURL(blob);
@@ -497,6 +497,9 @@ while (FORMAT_CONFIG.groupOverflowRows && snapChanged && snapPass < MAX_SNAP_PAS
       link.click();
       URL.revokeObjectURL(link.href);
     }
+    // the visual summary again ("Building the Excel file…" replaced it), plus where the file went
+    updateVisualStatus(visualStatuses, workbookWarning);
+    appendExportStatus(saveTarget ? `saved as ${saveTarget.name}` : `downloaded as ${exportFileName}`);
 
     console.log("✅ Export completed with Tableau formatting (fonts, colours, number formats, borders)");
 

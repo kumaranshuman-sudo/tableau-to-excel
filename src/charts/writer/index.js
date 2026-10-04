@@ -1,7 +1,6 @@
 /* ══════════════════════════════════════════════════════════════════════════
  * EXCEL NATIVE CHART WRITER
  * ──────────────────────────────────────────────────────────────────────────
- * ──────────────────────────────────────────────────────────────────────────
  * ExcelJS cannot author charts, so native charts are produced in two steps:
  *   1. writeChartData(ws, spec, row) – the chart's source data is written to a
  *      (hidden) data sheet with ExcelJS, so every chart stays editable and is

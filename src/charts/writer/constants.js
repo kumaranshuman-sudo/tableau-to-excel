@@ -37,7 +37,5 @@ export const AX = { cat: 50010, val: 50020, cat2: 50030, val2: 50040 };
 
 export const C15 = "http://schemas.microsoft.com/office/drawing/2012/chart";
 
-/* ══════════════════════════════════════════════════════════════════════
- * 3. XLSX package surgery
- * ══════════════════════════════════════════════════════════════════════ */
+/* XLSX package surgery: relationship and content types of the parts injectCharts adds */
 export const EMPTY_RELS = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="${NS.rels}"></Relationships>`;

@@ -4,9 +4,6 @@ import { tfBrightness } from "./colors.js";
 import { inferExcelNumFmt } from "./number-format.js";
 import { tfMerge } from "../twb/formatter.js";
 
-/* ══════════════════════════════════════════════════════════════════════════
- * 4. EXCEL MAPPING
- * ══════════════════════════════════════════════════════════════════════════ */
 export function tfExcelFont(p) {
   let name = p.fontName || "Arial";
   let bold = !!p.bold;

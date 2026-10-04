@@ -420,6 +420,8 @@ interface ExportItem {
   gridCol?: number;
   gridW?: number;
   allocatedRows?: number;
+  /** grouped tables: data rows kept visible – blocks beside the table use them (setTableVisibleRows) */
+  visibleRows?: number;
 }
 
 /* ── browser APIs the panel feature-detects (File System Access; Chromium only) ── */

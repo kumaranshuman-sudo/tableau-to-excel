@@ -1,9 +1,5 @@
 /* Tableau number formats → Excel number formats. */
 
-/* ══════════════════════════════════════════════════════════════════════════
- * 3. NUMBER FORMATS
- * ══════════════════════════════════════════════════════════════════════════ */
-
 /* Tableau text-format → Excel numFmt.
  * - strips Tableau's type prefix (n/c/p/e/*); locale "standard" codes (C1033…) → null (inferred instead)
  * - moves thousands-scaling commas behind the decimals: "#,##0,.0K" → "#,##0.0,\"K\""

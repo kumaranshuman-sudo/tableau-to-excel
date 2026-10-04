@@ -5,6 +5,18 @@ import { tvRoles } from "./roles.js";
 import { tvBoxPlotSpec, tvGanttSpec, tvPieSpec, tvScatterSpec, tvTreemapSpec, tvWaterfallSpec } from "./specialized.js";
 import { VISUAL_TYPES } from "../../config.js";
 
+/* ══════════════════════════════════════════════════════════════════════════
+ * TABLEAU VISUAL → EXCEL CHART SPECS
+ * ──────────────────────────────────────────────────────────────────────────
+ * buildExcelChartSpecs(visualModel, model) reads
+ *   – live summary data (already pivoted / merged / sorted by buildViewModel)
+ *   – TWB shelves, panes, marks, encodings, colours, number formats, labels
+ *   – the live visual specification when no workbook was loaded
+ * and returns renderer-neutral chart specs (ChartSpec, src/types.d.ts) for charts/writer.
+ * It throws when a visual cannot be represented faithfully, so the caller
+ * can fall back to the Tableau image renderer or the data table.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
 /**
  * @param {VisualModel} visualModel
  * @param {FormatModel | null} model

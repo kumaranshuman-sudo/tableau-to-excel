@@ -6,9 +6,6 @@ import { tfStrokeToBorder } from "./dashboard-text.js";
 import { tfParseFieldRef, tfRefKey, tfSameField } from "./field-ref.js";
 import { tfNorm, tfNum } from "../util.js";
 
-/* ══════════════════════════════════════════════════════════════════════════
- * 2. RESOLVER
- * ══════════════════════════════════════════════════════════════════════════ */
 export function tfFormatsToProps(m) {
   const p = {};
   if (m["font-family"]) p.fontName = m["font-family"];

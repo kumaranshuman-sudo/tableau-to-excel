@@ -197,10 +197,6 @@ export async function readWorkbookFile(file) {
         reader.readAsArrayBuffer(file);
       });
 
-      if (typeof JSZip === "undefined") {
-        throw new Error("JSZip not loaded. Add the JSZip script tag to index.html.");
-      }
-
       const zip = await JSZip.loadAsync(arrayBuffer);
       const twbEntry = Object.values(zip.files).find(
         f => !f.dir && /\.twb$/i.test(f.name)

@@ -2,9 +2,6 @@
 import { AX, C15, NS } from "./constants.js";
 import { esc, hex, levelStarts, num } from "./xml-util.js";
 
-/* ══════════════════════════════════════════════════════════════════════
- * 2. DrawingML chart XML
- * ══════════════════════════════════════════════════════════════════════ */
 export function solid(color, alpha) {
   if (!color) return "<a:noFill/>";
   return `<a:solidFill><a:srgbClr val="${hex(color)}">${alpha ? `<a:alpha val="${alpha}"/>` : ""}</a:srgbClr></a:solidFill>`;

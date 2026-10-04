@@ -12,21 +12,6 @@ import { tfNorm } from "../../util.js";
 
 "use strict";
 
-/* ══════════════════════════════════════════════════════════════════════════
- * TABLEAU VISUAL → EXCEL CHART SPECS
- * ──────────────────────────────────────────────────────────────────────────
- * buildExcelChartSpecs(visualModel, model) reads
- *   – live summary data (already pivoted / merged / sorted by buildViewModel)
- *   – TWB shelves, panes, marks, encodings, colours, number formats, labels
- *   – the live visual specification when no workbook was loaded
- * and returns renderer-neutral chart specs for excel_chart_writer.js.
- * It throws when a visual cannot be represented faithfully, so the caller
- * can fall back to the Tableau image renderer or the data table.
- *
- * Uses the tf* helpers, tvIsMeasureRef and VISUAL_TYPES from
- * build_table_copy.js (globals, resolved at call time).
- * ══════════════════════════════════════════════════════════════════════════ */
-
 export const TV_MAX_POINTS = 4000;
 
 export const TV_MAX_SERIES = 60;

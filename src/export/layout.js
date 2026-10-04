@@ -29,7 +29,8 @@ export function graphicBox(layout, vm) {
   const titleRows = vm.showTitle ? 1 : 0;
   const heightPx = Math.max(120, zoneH - (titleRows ? 28 : 0));
   return { widthPx, heightPx, titleRows,
-           gridW: Math.max(2, Math.ceil(widthPx / EXCEL_COL_PX)),
+           // the zone's width on the dashboard grid, so the block lines up with the blocks above / below it
+           gridW: layout && layout.widthPx ? layout.gridW : Math.max(2, Math.ceil(widthPx / EXCEL_COL_PX)),
            rows: titleRows + Math.ceil(heightPx / EXCEL_ROW_PX) };
 }
 
@@ -65,7 +66,23 @@ export function makeRangeTracker() {
   };
 }
 
+/* edges a few px apart (tiled containers with padding) → one grid line, so blocks that line up on
+ * the dashboard land in the same row / column */
+export const SNAP_PX = 8;
+
+/** @param {number[]} values @param {number} [tolerance] @returns {(v: number) => number} */
+export function snapEdges(values, tolerance = SNAP_PX) {
+  const anchor = new Map();
+  let current = null;
+  [...new Set(values)].sort((a, b) => a - b).forEach(v => {
+    if (current === null || v - current > tolerance) current = v;
+    anchor.set(v, current);
+  });
+  return v => anchor.has(v) ? anchor.get(v) : v;
+}
+
 /* ── buildLayoutMap ─────────────────────────────────────────────────── */
+/* Tableau's DashboardObject: position = { x, y }, size = { width, height } (px) */
 export function buildLayoutMap(dashboardObjects, titleMap = {}) {
   const map = new Map();
   
@@ -84,12 +101,17 @@ export function buildLayoutMap(dashboardObjects, titleMap = {}) {
     if (obj.position.y < minY) minY = obj.position.y;
   });
 
+  const sizeOf = obj => obj.size || obj.position;
+  const snapX = snapEdges(positionableObjects.flatMap(o => [o.position.x, o.position.x + (sizeOf(o).width || 0)]));
+  const snapY = snapEdges(positionableObjects.map(o => o.position.y));
+
   positionableObjects.forEach((obj) => {
     const px = obj.position;
-    const gridCol = Math.round((px.x - minX) / PX_PER_COL);
-    const gridRow = Math.round((px.y - minY) / PX_PER_ROW);
-    const gridW = Math.max(2, Math.round((px.width || 180) / PX_PER_COL));
-    const gridH = Math.max(3, Math.round((px.height || 60) / PX_PER_ROW));
+    const { width, height } = sizeOf(obj);
+    const gridCol = Math.round((snapX(px.x) - minX) / PX_PER_COL);
+    const gridRow = Math.round((snapY(px.y) - minY) / PX_PER_ROW);
+    const gridW = Math.max(2, Math.round((width || 180) / PX_PER_COL));
+    const gridH = Math.max(3, Math.round((height || 60) / PX_PER_ROW));
     
     let displayName = "";
     if (obj.type === "worksheet") {
@@ -100,20 +122,54 @@ export function buildLayoutMap(dashboardObjects, titleMap = {}) {
       displayName = (obj.name || "Filter").replace(/[_-]/g, " ");
     }
 
-    map.set(obj.name || `filter_${gridRow}_${gridCol}`, {
+    const key = obj.name || `filter_${gridRow}_${gridCol}`;
+    // a quick filter can carry its worksheet's name – the worksheet keeps its own position and size
+    if (obj.type !== "worksheet" && map.has(key) && map.get(key).type === "worksheet") return;
+    map.set(key, {
       type: obj.type,
       gridRow: Math.max(0, gridRow),
       gridCol: Math.max(0, gridCol),
       gridW,
       gridH,
-      widthPx: px.width || null,
-      heightPx: px.height || null,
+      widthPx: width || null,
+      heightPx: height || null,
       displayName,
       originalName: obj.name
     });
   });
 
   return map;
+}
+
+/* ── grouped table rows ─────────────────────────────────────────────────
+ * A long table shows its first ROW_GROUP_THRESHOLD rows and collapses the rest into an outline group.
+ * Excel hides whole sheet rows, so a chart / image / card beside the table would lose the same rows:
+ * the table keeps visible every row such a neighbour uses (it then fills the band like the Tableau
+ * zone) and only the rows below are collapsed. Tables beside each other keep their own threshold. */
+export function isGroupedTable(item) {
+  return !!(FORMAT_CONFIG.groupOverflowRows && item.vm && item.type === "worksheet" && !item.isKPI && !item.box &&
+            item.vm.rows.length > ROW_GROUP_THRESHOLD);
+}
+
+/* sheet row of a table's first data row */
+export function tableDataStart(item) {
+  return item.gridRow + (item.vm.showTitle ? 1 : 0) + (item.vm.showHeaderRow ? 1 : 0);
+}
+
+/** sets item.visibleRows on every table that will be grouped @param {ExportItem[]} items */
+export function setTableVisibleRows(items) {
+  items.forEach(t => {
+    if (!isGroupedTable(t)) return;
+    const start = tableDataStart(t);
+    const end = t.gridRow + t.allocatedRows;
+    let need = ROW_GROUP_THRESHOLD;
+    items.forEach(o => {
+      if (o === t || isGroupedTable(o)) return;
+      const oEnd = o.gridRow + (o.allocatedRows || o.rowCount || 0);
+      if (o.gridRow < end && oEnd > t.gridRow) need = Math.max(need, oEnd - start);   // shares sheet rows
+    });
+    t.visibleRows = Math.min(t.vm.rows.length, need);
+  });
 }
 
 /* rows the writer will produce – used for layout before writing */
@@ -154,30 +210,21 @@ for (const [, group] of rowGroups) {
   processedGroups.push({ minRow, items: group, bottom: groupBottom });
 }
 
-// ── Cascade vertical pushes until stable (not just one pass) ──
+// ── Vertical pushes: a row group moves down as a whole, below every earlier group it overlaps
+//    (not only the group just above), so blocks that share a top edge on the dashboard stay level ──
 processedGroups.sort((a, b) => a.minRow - b.minRow);
-let changed = true;
-while (changed) {
-  changed = false;
-  for (let i = 0; i < processedGroups.length - 1; i++) {
-    const upper = processedGroups[i];
-    const lower = processedGroups[i + 1];
-    let horizontalOverlap = false;
-    for (const u of upper.items) {
-      for (const l of lower.items) {
-        const uLeft = u.gridCol, uRight = u.gridCol + u.gridW;
-        const lLeft = l.gridCol, lRight = l.gridCol + l.gridW;
-        if (uLeft < lRight && uRight > lLeft) { horizontalOverlap = true; break; }
-      }
-      if (horizontalOverlap) break;
-    }
-    if (horizontalOverlap && lower.minRow < upper.bottom) {
-      const pushBy = upper.bottom - lower.minRow;
-      lower.items.forEach(z => { z.gridRow += pushBy; });
-      lower.minRow += pushBy;
-      lower.bottom += pushBy;
-      changed = true;
-    }
+const groupsOverlap = (upper, lower) => upper.items.some(u => lower.items.some(l =>
+  u.gridCol < l.gridCol + l.gridW && u.gridCol + u.gridW > l.gridCol));
+for (let i = 1; i < processedGroups.length; i++) {
+  const lower = processedGroups[i];
+  let pushBy = 0;
+  for (let j = 0; j < i; j++) {
+    if (groupsOverlap(processedGroups[j], lower)) pushBy = Math.max(pushBy, processedGroups[j].bottom - lower.minRow);
+  }
+  if (pushBy > 0) {
+    lower.items.forEach(z => { z.gridRow += pushBy; });
+    lower.minRow += pushBy;
+    lower.bottom += pushBy;
   }
 }
 

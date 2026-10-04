@@ -5,7 +5,7 @@ import { VISUAL_TYPES } from "../config.js";
 import { tfDvNum, tfNaturalCompare } from "../data/values.js";
 
 /* createVizImageAsync input spec, built from the same field roles as the native charts
- * (tvRoles in visual_chart_model.js): real shelves, colour, size, labels and view order.
+ * (tvRoles, charts/model/roles.js): real shelves, colour, size, labels and view order.
  * One value axis → v1 spec; several measures (combo / dual axis, Measure Values) → v2 spec.
  * The API draws bar / line / area / square / circle / text marks only and has one field per
  * shelf and no Detail channel, so several category levels are joined into one ordered field. */

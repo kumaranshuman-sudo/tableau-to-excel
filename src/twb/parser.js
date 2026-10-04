@@ -5,9 +5,6 @@ import { tfExtractRefs, tfParseFieldRef, tfRefKey } from "./field-ref.js";
 import { tfMerge } from "./formatter.js";
 import { tfDefined, tfKid, tfKids, tfNum } from "../util.js";
 
-/* ══════════════════════════════════════════════════════════════════════════
- * 1. PARSER
- * ══════════════════════════════════════════════════════════════════════════ */
 export function tfParseRunProps(run) {
   const a = n => run.getAttribute(n);
   const align = { "0": "left", "1": "center", "2": "right" }[a("fontalignment")];

@@ -76,7 +76,6 @@ export function insertDrawingTag(sheetXml, rid) {
  * @returns {Promise<ArrayBuffer | Uint8Array>}
  */
 export async function injectCharts(buffer, opts) {
-  if (typeof JSZip === "undefined") throw new Error("JSZip is required to add native Excel charts");
   const charts = (opts.charts || []).filter(Boolean);
   if (!charts.length) return buffer;
   const zip = await JSZip.loadAsync(buffer);

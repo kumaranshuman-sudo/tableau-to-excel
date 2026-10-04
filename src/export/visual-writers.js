@@ -78,7 +78,8 @@ export function writeKPICardStacked(worksheet, vm, originRow, originCol, rangeTr
   return (vm.showTitle ? 1 : 0) + order.length;
 }
 
-export function writeRegularTable(worksheet, vm, originRow, originCol, rangeTracker, allTablesInfo, colWidths, exactWidths) {
+export function writeRegularTable(worksheet, vm, originRow, originCol, rangeTracker, allTablesInfo, colWidths, exactWidths,
+                                  visibleRows = ROW_GROUP_THRESHOLD) {
   let r = originRow;
   const C = originCol;
   const { fmt, cols, rows, order } = vm;
@@ -151,7 +152,8 @@ export function writeRegularTable(worksheet, vm, originRow, originCol, rangeTrac
 
   const dataStartRow = r;
   const totalRows = rows.length;
-  const needsGrouping = FORMAT_CONFIG.groupOverflowRows && totalRows > ROW_GROUP_THRESHOLD;
+  const keepRows = Math.max(ROW_GROUP_THRESHOLD, visibleRows || 0);   // rows a block beside the table uses stay visible
+  const needsGrouping = FORMAT_CONFIG.groupOverflowRows && totalRows > keepRows;
   const level = Math.max(1, rowDiv.level || 1);
   const rowHeightPx = fmt.rowHeightPx();
 
@@ -197,7 +199,7 @@ export function writeRegularTable(worksheet, vm, originRow, originCol, rangeTrac
 
     const excelRow = worksheet.getRow(r + 1);
     if (rowHeightPx) excelRow.height = Math.round(rowHeightPx * 0.75);   // only a height Tableau stores
-    if (needsGrouping && rowIdx >= ROW_GROUP_THRESHOLD) {
+    if (needsGrouping && rowIdx >= keepRows) {
       excelRow.outlineLevel = 1;
       excelRow.hidden = true;
     }
@@ -205,7 +207,7 @@ export function writeRegularTable(worksheet, vm, originRow, originCol, rangeTrac
   });
 
   if (needsGrouping) {
-    const hiddenCount = totalRows - ROW_GROUP_THRESHOLD;
+    const hiddenCount = totalRows - keepRows;
     const noteCell = worksheet.getCell(r + 1, C + 1);
     noteCell.value = `${hiddenCount} rows are hidden — use the row group controls [+] / [-] on the left to expand or collapse`;
     noteCell.font = { italic: true, size: 9, color: { argb: "FF888888" } };

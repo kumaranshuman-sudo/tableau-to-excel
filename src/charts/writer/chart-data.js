@@ -1,9 +1,6 @@
 /* Chart source data → worksheet cells (charts stay editable and linked). */
 import { cellRef, levelStarts, num } from "./xml-util.js";
 
-/* ══════════════════════════════════════════════════════════════════════
- * 1. CHART DATA → worksheet cells
- * ══════════════════════════════════════════════════════════════════════ */
 /**
  * @param {import("exceljs").Worksheet} ws the (hidden) chart data sheet
  * @param {ChartSpec} spec

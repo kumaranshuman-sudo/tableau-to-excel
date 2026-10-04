@@ -15,7 +15,7 @@ export { FORMAT_CONFIG, TABLEAU_DEFAULTS, TF_DERIV_LABEL, TF_ELEMENTS, VISUAL_TY
 export { TF_MONTHS, TF_WEEKDAYS, tfCalendarRank, tfDvNum, tfDvText, tfIsNull, tfNaturalCompare } from "./data/values.js";
 export { setCellValue, subtitleCell, tableDataCell, tableHeaderCell, thickBorder, thinBorder, titleCell, writeDashboardTitle, writeIndividualFilterTable } from "./export/cell-writers.js";
 export { applyConditionalFormattingToTable, getZeroCenteredColor, isGeographicCoordinate, isNumeric, isNumericForFormatting, shouldSkipConditionalFormatting } from "./export/conditional-format.js";
-export { CHART_DATA_SHEET, COL_GAP, EXCEL_COL_PX, EXCEL_ROW_PX, PX_PER_COL, PX_PER_ROW, ROW_GAP, ROW_GROUP_THRESHOLD, TITLE_ROWS, buildLayoutMap, getExcelColumnName, graphicBox, makeRangeTracker, resolveCollisions, viewModelHeight } from "./export/layout.js";
+export { CHART_DATA_SHEET, COL_GAP, EXCEL_COL_PX, EXCEL_ROW_PX, PX_PER_COL, PX_PER_ROW, ROW_GAP, ROW_GROUP_THRESHOLD, SNAP_PX, TITLE_ROWS, buildLayoutMap, getExcelColumnName, graphicBox, isGroupedTable, makeRangeTracker, resolveCollisions, setTableVisibleRows, snapEdges, tableDataStart, viewModelHeight } from "./export/layout.js";
 export { extractFilterValuesPerField, fetchAllSheetsData, isFilterValueWorksheet } from "./export/sheet-data.js";
 export { applyAutoFilters, borderSide, buildColorPlan, setColumnWidths, writeKPICardStacked, writeRegularTable, writeTableauTitle } from "./export/visual-writers.js";
 export { tfBuildColorScale } from "./format/color-scale.js";
