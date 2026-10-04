@@ -1025,6 +1025,7 @@ function resolveVisualMarks(spec, vm, model) {
     if (shape.geo) tokens = ["map"];
     else if (shape.rowMeasures && shape.colMeasures) tokens = ["circle"];
     else if (shape.rowMeasures || shape.colMeasures) tokens = [shape.continuousDimension ? "line" : "bar"];
+    else if (shape.shelfFields === 0 && shape.size) tokens = ["square"];   // empty shelves + Size → treemap
     else tokens = ["text"];
   }
   return { tokens, shape, source };
@@ -2491,21 +2492,30 @@ if (typeof module !== "undefined" && module.exports) {  // lets you unit-test th
   async function storeFormatModel(fileName, model, titleMap) {
     try {
       const db = await openHandleDb();
-      db.transaction(HANDLE_STORE, "readwrite").objectStore(HANDLE_STORE).put({ fileName, model, titleMap }, "formatModel");
+      // one entry per workbook file: any dashboard of a workbook loaded once is matched again later
+      db.transaction(HANDLE_STORE, "readwrite").objectStore(HANDLE_STORE)
+        .put({ fileName, model, titleMap, savedAt: Date.now() }, "model:" + String(fileName).toLowerCase());
     } catch (e) {
       console.warn("[Workbook] could not keep the workbook formatting in browser storage:", e.message);
     }
   }
-  async function restoreFormatModel() {
+  async function restoreFormatModels() {
     try {
       const db = await openHandleDb();
       return await new Promise(resolve => {
-        const req = db.transaction(HANDLE_STORE).objectStore(HANDLE_STORE).get("formatModel");
-        req.onsuccess = () => resolve(req.result || null);
-        req.onerror = () => resolve(null);
+        const out = [];
+        const req = db.transaction(HANDLE_STORE).objectStore(HANDLE_STORE).openCursor();
+        req.onsuccess = () => {
+          const cur = req.result;
+          if (!cur) return resolve(out);
+          const key = String(cur.key);
+          if ((key.startsWith("model:") || key === "formatModel") && cur.value && cur.value.model) out.push(cur.value);
+          cur.continue();
+        };
+        req.onerror = () => resolve(out);
       });
     } catch (e) {
-      return null;
+      return [];
     }
   }
 
@@ -2679,7 +2689,7 @@ if (typeof module !== "undefined" && module.exports) {  // lets you unit-test th
   function getTitleMap() {
     try {
       const saved = tableau.extensions.settings.get("twbTitleMap");
-      if (!saved) return {};
+      if (!saved) return RESTORED_TITLE_MAP || {};
       return JSON.parse(saved);
     } catch (err) {
       console.warn("[getTitleMap] Could not read settings:", err.message);
@@ -2701,13 +2711,23 @@ if (typeof module !== "undefined" && module.exports) {  // lets you unit-test th
     }
     return FORMAT_MODEL_CACHE;
   }
+  /* workbook model for THIS dashboard: memory / settings first, else the remembered workbook
+   * whose worksheets match the dashboard best (no Load Workbook needed again) */
+  let RESTORED_TITLE_MAP = null;
+  let RESTORED_FILE_NAME = null;
   async function ensureFormatModel() {
-    if (getFormatModel()) return FORMAT_MODEL_CACHE;
-    const saved = await restoreFormatModel();
-    const fileName = tableau.extensions.settings.get("twbFileName");
-    if (saved && saved.model && (!fileName || saved.fileName === fileName)) {
-      FORMAT_MODEL_CACHE = saved.model;
-      console.log(`[Workbook] formatting for ${saved.fileName} restored from browser storage`);
+    const dashboard = tableau.extensions.dashboardContent.dashboard;
+    const rank = m => { const r = checkWorkbookMatch(m, dashboard); return !r ? -1 : r.level === "ok" ? 2 + r.matched : r.level === "partial" ? 1 + r.matched / (r.total || 1) : 0; };
+    const current = getFormatModel();
+    if (current && rank(current) >= 2) return current;
+    const saved = await restoreFormatModels();
+    let best = null, bestRank = current ? rank(current) : 0;
+    saved.forEach(rec => { const r = rank(rec.model); if (r > bestRank) { best = rec; bestRank = r; } });
+    if (best) {
+      FORMAT_MODEL_CACHE = best.model;
+      RESTORED_TITLE_MAP = best.titleMap || null;
+      RESTORED_FILE_NAME = best.fileName;
+      console.log(`[Workbook] using remembered workbook ${best.fileName} for this dashboard`);
     }
     return FORMAT_MODEL_CACHE;
   }
@@ -3131,6 +3151,14 @@ if (typeof module !== "undefined" && module.exports) {  // lets you unit-test th
           });
         } else {
           fileLabel.textContent = "No workbook loaded — click 📁 to load titles and colors";
+          ensureFormatModel().then(model => {
+            if (model && RESTORED_FILE_NAME) {
+              showWorkbookLabel(RESTORED_FILE_NAME, `remembered from an earlier load, formatting for ${Object.keys(model.sheets || {}).length} sheets`, model);
+            } else {
+              fileLabel.textContent = "⚠ No workbook loaded — click 📁 Load Workbook, otherwise charts are exported as tables";
+              fileLabel.classList.add("status-warning");
+            }
+          });
         }
       }
 
@@ -3147,6 +3175,13 @@ if (typeof module !== "undefined" && module.exports) {  // lets you unit-test th
     const now = new Date();
     const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}`;
     const exportFileName = `${(dashboard.name || "Dashboard Export").replace(/[\\\/\*\?\[\]:]/g, "").slice(0, 31)}_${stamp}.xlsx`;
+    if (!(await ensureFormatModel()) && !window.confirm(
+        "No Tableau workbook is loaded for this dashboard.\n\n" +
+        "Without it the extension cannot tell which sheets are charts, so they will be exported as tables.\n\n" +
+        "Cancel, then click 📁 Load Workbook to export real charts – or OK to export tables anyway.")) {
+      setExportStatus("Export stopped – click 📁 Load Workbook first so charts are exported as charts", true);
+      return;
+    }
     setExportStatus("Choose where to save the Excel file…");
     const saveTarget = await chooseSaveTarget(exportFileName);       // opens in the loaded workbook's folder
     if (saveTarget === "cancelled") { setExportStatus("Export cancelled – no file was saved"); return; }

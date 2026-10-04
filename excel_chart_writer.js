@@ -111,6 +111,14 @@ const ExcelChartWriter = (function () {
                  x: cellRef(sheet, cx, startRow + 1, cx, startRow + Math.max(1, n)),
                  y: cellRef(sheet, cy, startRow + 1, cy, startRow + Math.max(1, n)) };
       });
+      const lblCol = 2 * spec.series.length;
+      spec.series.forEach((s, k) => {
+        if (!s.labelTexts) return;
+        const c = lblCol + k;
+        put(startRow, c, s.name + " – label");
+        s.labelTexts.forEach((v, i) => put(startRow + 1 + i, c, v));
+        series[k].lbl = cellRef(sheet, c, startRow + 1, c, startRow + Math.max(1, s.labelTexts.length));
+      });
       return { series, nextRow: startRow + maxLen + 3 };
     }
 
@@ -191,8 +199,16 @@ const ExcelChartWriter = (function () {
     return `<c:${tag}><c:numRef><c:f>${esc(ref)}</c:f><c:numCache>${numCache(values)}</c:numCache></c:numRef></c:${tag}>`;
   }
 
+  const C15 = "http://schemas.microsoft.com/office/drawing/2012/chart";
   function dLbls(spec, s, pos) {
     if (!s.labels) return "";
+    if (s.labelTexts) {
+      return `<c:dLbls><c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr>${txPr(spec.font)}` +
+        `<c:dLblPos val="${pos || "r"}"/><c:showLegendKey val="0"/><c:showVal val="0"/><c:showCatName val="0"/>` +
+        `<c:showSerName val="0"/><c:showPercent val="0"/><c:showBubbleSize val="0"/>` +
+        `<c:extLst><c:ext uri="{CE6537A1-D6FC-4f65-9D91-7224C49458BB}" xmlns:c15="${C15}">` +
+        `<c15:showDataLabelsRange val="1"/></c:ext></c:extLst></c:dLbls>`;
+    }
     const fmt = s.labelNumFmt || (s.secondary ? spec.secondaryNumFmt : spec.numFmt);
     const showVal = s.labelParts ? (s.labelParts.value ? 1 : 0) : 1;
     const showCat = s.labelParts && s.labelParts.category ? 1 : 0;
@@ -242,7 +258,11 @@ const ExcelChartWriter = (function () {
     // scatter
     const dpts = pc.map((c, i) => c ? `<c:dPt><c:idx val="${i}"/>${markerXml("circle", c, 7)}<c:bubble3D val="0"/></c:dPt>` : "").join("");
     return `<c:ser>${head}<c:spPr><a:ln w="19050"><a:noFill/></a:ln></c:spPr>${markerXml("circle", s.color, 7)}${dpts}` +
-      `${dLbls(spec, s, "t")}${valXml("xVal", r.x, s.x)}${valXml("yVal", r.y, s.y)}<c:smooth val="0"/></c:ser>`;
+      `${dLbls(spec, s, "r")}${valXml("xVal", r.x, s.x)}${valXml("yVal", r.y, s.y)}<c:smooth val="0"/>` +
+      (s.labelTexts && r.lbl
+        ? `<c:extLst><c:ext uri="{02D57815-91ED-43cb-92C2-25804820EDAC}" xmlns:c15="${C15}"><c15:datalabelsRange>` +
+          `<c15:f>${esc(r.lbl)}</c15:f><c15:dlblRangeCache>${strCache(s.labelTexts)}</c15:dlblRangeCache>` +
+          `</c15:datalabelsRange></c:ext></c:extLst>` : "") + `</c:ser>`;
   }
 
   function catAxis(spec, id, cross, o = {}) {
@@ -264,6 +284,23 @@ const ExcelChartWriter = (function () {
     if (Math.max(...nums) <= 0) return `<c:max val="0"/>`;
     return "";
   }
+  /* axis ticks: Tableau's automatic axis drops decimals and abbreviates thousands (100K, 1.5M);
+   * labels and the data cells keep the full number format */
+  function axisFmt(fmt, values) {
+    const nums = (values || []).filter(v => num(v) !== null).map(Math.abs);
+    if (!fmt || !nums.length) return fmt || "General";
+    const max = Math.max(...nums);
+    if (max < 1000) {
+      if (/%/.test(fmt)) return fmt;
+      if (max >= 10) return fmt.replace(/0.0+/g, "0");
+      return fmt.replace(/0.0{2,}/g, "0.0");
+    }
+    const plain = fmt.match(/^("[^"]*")?(#,##0|0)(.0+)?$/);
+    if (plain && max >= 1e6) return (plain[1] || "") + '#,##0.0,,"M"';
+    if (plain && max >= 1e4) return (plain[1] || "") + '#,##0,"K"';
+    return fmt.replace(/0.0+/g, "0");
+  }
+
   function valAxis(spec, id, cross, o = {}) {
     const horizontal = spec.barDir === "bar" && spec.kind !== "scatter";
     const pos = o.pos || (horizontal ? "b" : "l");
@@ -276,7 +313,7 @@ const ExcelChartWriter = (function () {
       : spec.includeZero === false || !o.values ? "" : zeroScaling(o.values);
     return `<c:valAx><c:axId val="${id}"/><c:scaling><c:orientation val="minMax"/>${scale}</c:scaling><c:delete val="${o.deleted ? 1 : 0}"/>` +
       `<c:axPos val="${pos}"/>${grid}${title(o.title, spec.font, pos === "l" || pos === "r")}` +
-      `<c:numFmt formatCode="${esc(o.numFmt || "General")}" sourceLinked="0"/><c:majorTickMark val="none"/>` +
+      `<c:numFmt formatCode="${esc(axisFmt(o.numFmt || "General", o.values))}" sourceLinked="0"/><c:majorTickMark val="none"/>` +
       `<c:minorTickMark val="none"/><c:tickLblPos val="${o.lowLabels ? "low" : "nextTo"}"/><c:spPr><a:ln><a:noFill/></a:ln></c:spPr>` +
       `${txPr(spec.font)}<c:crossAx val="${cross}"/><c:crosses val="${crosses}"/>` +
       `<c:crossBetween val="${o.midCat ? "midCat" : "between"}"/></c:valAx>`;
@@ -377,7 +414,10 @@ const ExcelChartWriter = (function () {
       `<cx:tx><cx:txData><cx:f>${esc(refs.series[0].tx)}</cx:f><cx:v>${esc(s.name)}</cx:v></cx:txData></cx:tx>` +
       tile(s.color) +
       (s.pointColors || []).map((c, i) => c ? `<cx:dataPt idx="${i}">${tile(c)}</cx:dataPt>` : "").join("") +
-      (s.labels ? `<cx:dataLabels pos="inEnd">${labelPr}<cx:visibility seriesName="0" categoryName="1" value="0"/></cx:dataLabels>` : "") +
+      (s.labels ? `<cx:dataLabels pos="inEnd">` +
+        (s.labelParts && s.labelParts.value ? `<cx:numFmt formatCode="${esc(spec.numFmt || "General")}" sourceLinked="0"/>` : "") +
+        `${labelPr}<cx:visibility seriesName="0" categoryName="1" value="${s.labelParts && s.labelParts.value ? 1 : 0}"/>` +
+        (s.labelParts && s.labelParts.value ? `<cx:separator>${"\n"}</cx:separator>` : "") + `</cx:dataLabels>` : "") +
       `<cx:dataId val="0"/><cx:layoutPr><cx:parentLabelLayout val="${levels.length > 1 ? "banner" : "none"}"/></cx:layoutPr>` +
       `</cx:series></cx:plotAreaRegion></cx:plotArea></cx:chart>` +
       `<cx:spPr>${solid(spec.background || "FFFFFF")}<a:ln><a:noFill/></a:ln></cx:spPr></cx:chartSpace>`;

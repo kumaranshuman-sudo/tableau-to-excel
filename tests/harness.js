@@ -38,7 +38,8 @@ const EXPECTED = {
   "Symbol Map": ["MAP", "tableau-image", "img:circle"],
   "Filled Map": ["MAP_FILLED", "data-fallback", ""],
   "Waterfall": ["WATERFALL", "excel-chart", "bar"],
-  "Box Plot": ["BOXPLOT", "excel-chart", "line"]
+  "Box Plot": ["BOXPLOT", "excel-chart", "line"],
+  "Tree Map (Automatic)": ["TREEMAP", "excel-chart", "treemap"]
 };
 const ctx = {
   console: { log() {}, warn() {}, error: console.error, info() {} },
@@ -71,6 +72,11 @@ const model = X.parseTableauFormatting(fs.readFileSync(path.join(ROOT, "test_wor
   wf.runningTotals = clone(wf.rows);
   wf.panes.forEach(p => { p.markClass = "GanttBar"; });
   model.sheets["Waterfall"] = wf;
+  // treemap built with Tableau's Automatic mark (empty shelves + Size): Tableau draws squares
+  const tma = clone(model.sheets["Treemap"]);
+  tma.name = "Tree Map (Automatic)";
+  tma.panes.forEach(p => { p.markClass = "Automatic"; });
+  model.sheets["Tree Map (Automatic)"] = tma;
   const bp = clone(model.sheets["Circle View"]);
   bp.name = "Box Plot";
   bp.boxPlot = true;
@@ -166,7 +172,8 @@ const SHEETS = {
     s.data.sort((a, b) => a[0].value.localeCompare(b[0].value)).forEach(r => { run += r[1].value * (r[0].value < "F" ? 1 : -0.3); r[1] = dv(run, meas["SUM(Profit)"].fmt); });
     return s;
   })(),
-  "Box Plot": summary(["Category", "Segment", "Sub-Category"], ["SUM(Sales)"])
+  "Box Plot": summary(["Category", "Segment", "Sub-Category"], ["SUM(Sales)"]),
+  "Tree Map (Automatic)": summary(["Sub-Category"], ["SUM(Profit)", "SUM(Sales)"])
 };
 
 /* ── run ─────────────────────────────────────────────────────────────────── */

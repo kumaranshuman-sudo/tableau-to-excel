@@ -325,6 +325,12 @@ function tvPieSpec(ctx) {
     categories = { names: [tvMeasureLabel(vm, catCi)], levels: cats.levels };
     values = tvSum(vm, cats, angleCi);
   }
+  // a dual-pie donut's hole pane contributes a row with no category and no value → not a slice
+  const keep = categories.levels[0].map((label, i) => !(label === "Null" && !values[i]));
+  if (keep.includes(false)) {
+    categories = { ...categories, levels: categories.levels.map(lv => lv.filter((_, i) => keep[i])) };
+    values = values.filter((_, i) => keep[i]);
+  }
   if (categories.levels[0].length > 200) throw new Error("too many pie slices for an Excel chart");
   const angleRef = vm.cols[angleCi] && vm.cols[angleCi].ref;
   const catRef = catCi >= 0 && vm.cols[catCi].ref;
@@ -357,19 +363,27 @@ function tvScatterSpec(ctx) {
   const rows = vm.rows.filter(r => { const p = point(r); return p.x !== null && p.y !== null; });
   if (rows.length > TV_MAX_POINTS) throw new Error(`${rows.length} marks – too many for an Excel scatter chart`);
   const colorCi = roles.color && !roles.color.measureNames ? roles.color.ci : -1;
-  const labels = tvLabelsOn(roles, ym.ref);
+  // Label = a dimension (store name …) → Excel "value from cells" labels with that text, when
+  // few enough marks to stay readable; numbers only when a measure itself is on Label
+  const labelDim = roles.textDims[0] ?? -1;
+  const measureLabel = roles.labelRefs.some(r => tfSameField(r, ym.ref) || tfSameField(r, xm.ref));
+  const textLabels = labelDim >= 0 && rows.length <= 40;
+  const labels = textLabels || measureLabel || (labelDim < 0 && tvLabelsOn(roles, ym.ref));
+  const labelOf = r => tvText(r[labelDim]);
   if (colorCi >= 0 && !roles.color.continuous) {
     const values = tvColorValues(vm, roles);
     if (values.length > TV_MAX_SERIES) throw new Error("too many colour values for an Excel chart");
     spec.series = values.map((v, i) => {
       const pts = rows.filter(r => tvText(r[colorCi]) === v).map(point);
       return { name: v, color: (scale && scale(v)) || tvHex(TABLEAU_10[i % TABLEAU_10.length]),
-               x: pts.map(p => p.x), y: pts.map(p => p.y), labels };
+               x: pts.map(p => p.x), y: pts.map(p => p.y), labels,
+               labelTexts: textLabels ? rows.filter(r => tvText(r[colorCi]) === v).map(labelOf) : undefined };
     });
   } else {
     const pts = rows.map(point);
     spec.series = [{
       name: tvMeasureLabel(vm, ym.ci), color: tvMarkColor(roles), x: pts.map(p => p.x), y: pts.map(p => p.y), labels,
+      labelTexts: textLabels ? rows.map(labelOf) : undefined,
       pointColors: colorCi >= 0 && scale ? rows.map(r => scale(tfDvNum(r[colorCi]))) : undefined
     }];
   }
@@ -516,7 +530,8 @@ function tvCartesianSpecs(ctx) {
     const series = [];
     measures.forEach((m, i) => seriesFor(m, {
       type: { ...tvSeriesType(marks[i]), secondary: measures.length === 2 && i === 1 },
-      color: tvHex(TABLEAU_10[i % TABLEAU_10.length]), prefix: colorCi >= 0, noPointColors: true
+      color: (color && color.measureNames && scale ? scale(vm.cols[m.ci].name, i) : null) || tvHex(TABLEAU_10[i % TABLEAU_10.length]),
+      prefix: colorCi >= 0, noPointColors: true
     }).forEach(s => series.push(s)));
     return [make(series, {
       numFmt: tvNumFmt(vm, measures[0].ci), valueTitle: tvMeasureLabel(vm, measures[0].ci),
@@ -745,12 +760,30 @@ function tvTreemapSpec(ctx) {
   }
   // drop empty / negative tiles: a treemap cannot draw them
   const keep = sizes.map((v, i) => v !== null && v > 0 ? i : -1).filter(i => i >= 0);
+  // Excel builds the hierarchy from consecutive rows: keep each parent's tiles together,
+  // biggest parent first, biggest tile first inside it (Tableau's treemap order)
+  const pathKey = (i, l) => cats.levels.slice(0, l + 1).map(lv => lv[i]).join("\u0001");
+  const totals = cats.levels.map((_, l) => {
+    const m = new Map();
+    keep.forEach(i => m.set(pathKey(i, l), (m.get(pathKey(i, l)) || 0) + sizes[i]));
+    return m;
+  });
+  keep.sort((a, b) => {
+    for (let l = 0; l < cats.levels.length; l++) {
+      const ka = pathKey(a, l), kb = pathKey(b, l);
+      if (ka === kb) continue;
+      return (totals[l].get(kb) - totals[l].get(ka)) || (ka < kb ? -1 : 1);
+    }
+    return 0;
+  });
   return [{
     ...tvBaseSpec(vm), kind: "treemap", legend: false,
     categories: { names: levelCis.map(ci => tvMeasureLabel(vm, ci)), levels: cats.levels.map(lv => keep.map(i => lv[i])) },
     numFmt: tvNumFmt(vm, roles.size),
     series: [{ name: tvMeasureLabel(vm, roles.size), values: keep.map(i => sizes[i]), color: tvMarkColor(roles),
-               pointColors: pointColors ? keep.map(i => pointColors[i]) : undefined, labels: true }]
+               pointColors: pointColors ? keep.map(i => pointColors[i]) : undefined, labels: true,
+               // Size measure also on Label → "Quality Issue 20K", like Tableau
+               labelParts: { category: true, value: roles.labelRefs.some(r => tfSameField(r, vm.cols[roles.size].ref || {})) } }]
   }];
 }
 
