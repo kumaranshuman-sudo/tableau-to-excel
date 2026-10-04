@@ -199,7 +199,7 @@ const ExcelChartWriter = (function () {
     return `<c:dLbls>${fmt ? `<c:numFmt formatCode="${esc(fmt)}" sourceLinked="0"/>` : ""}` +
       `<c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr>${txPr(spec.font)}` +
       `${pos ? `<c:dLblPos val="${pos}"/>` : ""}<c:showLegendKey val="0"/><c:showVal val="${showVal}"/>` +
-      `<c:showCatName val="${showCat}"/><c:showSerName val="0"/><c:showPercent val="0"/><c:showBubbleSize val="0"/>` +
+      `<c:showCatName val="${showCat}"/><c:showSerName val="0"/><c:showPercent val="${s.labelParts && s.labelParts.percent ? 1 : 0}"/><c:showBubbleSize val="0"/>` +
       `${spec.kind === "pie" || spec.kind === "doughnut" ? '<c:showLeaderLines val="1"/>' : ""}</c:dLbls>`;
   }
   function markerXml(symbol, color, size) {
@@ -274,7 +274,7 @@ const ExcelChartWriter = (function () {
     const scale = fixed.max !== undefined || fixed.min !== undefined
       ? (fixed.max !== undefined ? `<c:max val="${fixed.max}"/>` : "") + (fixed.min !== undefined ? `<c:min val="${fixed.min}"/>` : "")
       : spec.includeZero === false || !o.values ? "" : zeroScaling(o.values);
-    return `<c:valAx><c:axId val="${id}"/><c:scaling><c:orientation val="minMax"/>${scale}</c:scaling><c:delete val="0"/>` +
+    return `<c:valAx><c:axId val="${id}"/><c:scaling><c:orientation val="minMax"/>${scale}</c:scaling><c:delete val="${o.deleted ? 1 : 0}"/>` +
       `<c:axPos val="${pos}"/>${grid}${title(o.title, spec.font, pos === "l" || pos === "r")}` +
       `<c:numFmt formatCode="${esc(o.numFmt || "General")}" sourceLinked="0"/><c:majorTickMark val="none"/>` +
       `<c:minorTickMark val="none"/><c:tickLblPos val="${o.lowLabels ? "low" : "nextTo"}"/><c:spPr><a:ln><a:noFill/></a:ln></c:spPr>` +
@@ -332,7 +332,7 @@ const ExcelChartWriter = (function () {
     const axisValues = secondary => spec.series.filter(s => !!s.secondary === secondary).flatMap(s => s.values);
     let axes = catAxis(spec, AX.cat, AX.val) +
       valAxis(spec, AX.val, AX.cat, { title: spec.valueTitle, numFmt: spec.numFmt, values: axisValues(false),
-                                      fixed: { min: spec.valueMin, max: spec.valueMax } });
+                                      fixed: { min: spec.valueMin, max: spec.valueMax }, deleted: spec.valueAxisHidden });
     if (hasSecondary) {
       axes += catAxis(spec, AX.cat2, AX.val2, { deleted: true }) +
         valAxis(spec, AX.val2, AX.cat2, { pos: spec.barDir === "bar" ? "t" : "r", crosses: "max", grid: false,

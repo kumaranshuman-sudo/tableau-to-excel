@@ -59,10 +59,12 @@ function tvRoles(vm, model, liveSpec) {
       return i;
     };
     for (const shelf of ["rows", "cols"]) {
+      let mvAxis = 0;                              // dual-axis Measure Values: "MV + MV" → axis 0 and 1
       for (const ref of sheet[shelf]) {
         if (ref.name === "Measure Names") { roles.measureNames = shelf; continue; }
         if (ref.name === "Multiple Values") {
-          pivoted.forEach(ci => roles[shelf].values.push({ ci, ref: vm.cols[ci].ref, mv: true }));
+          const axis = mvAxis++;
+          pivoted.forEach(ci => roles[shelf].values.push({ ci, ref: vm.cols[ci].ref, mv: true, axis }));
           continue;
         }
         const ci = colOf(ref);
@@ -326,7 +328,10 @@ function tvPieSpec(ctx) {
   if (categories.levels[0].length > 200) throw new Error("too many pie slices for an Excel chart");
   const angleRef = vm.cols[angleCi] && vm.cols[angleCi].ref;
   const catRef = catCi >= 0 && vm.cols[catCi].ref;
-  const labelValue = tvLabelsOn(roles, angleRef);
+  // a "% of Total" quick table calc on Label → Excel's percentage label instead of the raw value
+  const labelPct = roles.labelRefs.some(r => /^pcto$/i.test(r.deriv || ""));
+  const labelValue = !!angleRef && roles.labelRefs.some(r => !/^pcto$/i.test(r.deriv || "") && tfSameField(r, angleRef)) ||
+    (!labelPct && tvLabelsOn(roles, angleRef));
   const labelCat = !!catRef && roles.labelRefs.some(r => tfSameField(r, catRef));
   spec.categories = categories;
   spec.numFmt = tvNumFmt(vm, angleCi);
@@ -335,8 +340,9 @@ function tvPieSpec(ctx) {
     color: tvMarkColor(roles),
     values,
     pointColors: categories.levels[0].map((v, i) => (scale && scale(v, i)) || tvHex(TABLEAU_10[i % TABLEAU_10.length])),
-    labels: labelValue || labelCat,
-    labelParts: { value: labelValue, category: labelCat }
+    labels: labelValue || labelCat || labelPct,
+    labelParts: { value: labelValue, category: labelCat, percent: labelPct },
+    labelNumFmt: labelPct && !labelValue ? "0.0%" : undefined
   }];
   return [spec];
 }
@@ -430,7 +436,57 @@ function tvCartesianSpecs(ctx) {
 
   // Measure Values: one chart, one series per measure
   if (mvMode) {
-    const type = tvSeriesType(tvMeasureMark(roles, null, sheetMark));
+    // dual axis "MV + MV": every measure is listed once per axis, and each axis has its own
+    // pane (id 1, 2, …) with its own mark → one entry per measure, marks per axis
+    const axisCount = Math.max(...measures.map(m => (m.axis || 0) + 1));
+    const axisMarks = Array.from({ length: axisCount }, (_, k) => {
+      const pane = roles.panes.find(p => String(p.id) === String(k + 1));
+      return (axisCount > 1 && pane && tvMarkToken(pane.markClass)) || tvMeasureMark(roles, null, sheetMark);
+    });
+    const unique = measures.filter((m, i) => measures.findIndex(x => x.ci === m.ci) === i);
+    const markSet = [...new Set(axisMarks.map(t => tvSeriesType(t).marker && tvSeriesType(t).line === false ? "dot" : tvSeriesType(t).type))];
+    const type = tvSeriesType(axisMarks.find(t => tvSeriesType(t).type === "bar") || axisMarks[0]);
+
+    if (!mnCategory && axisCount > 1 && markSet.length > 1) {
+      if (markSet.includes("bar") && markSet.includes("dot")) {
+        // lollipop: bar + circle on the same values. Vertical → thin bars + markers;
+        // horizontal → Excel cannot mix bar and line orientations, so thin bars only
+        const colorOf = (m, i) => (color && color.measureNames && scale ? scale(vm.cols[m.ci].name, i) : null) ||
+          (unique.length === 1 ? tvMarkColor(roles) : tvHex(TABLEAU_10[i % TABLEAU_10.length]));
+        const series = [];
+        unique.forEach((m, i) => {
+          const base = { name: tvMeasureLabel(vm, m.ci), values: tvSum(vm, cats, m.ci), color: colorOf(m, i), pointColors };
+          series.push({ ...base, type: "bar", labels: false });
+          if (!horizontal) series.push({ ...base, name: base.name + " ", type: "line", line: false, marker: true, markerSize: 9,
+                                         labels: tvLabelsOn(roles, m.ref) });
+        });
+        if (horizontal) series.forEach(s => { s.labels = tvLabelsOn(roles, unique[0].ref); });
+        const spec = make(series, { numFmt: tvNumFmt(vm, unique[0].ci), gapWidth: 300,
+                                    valueTitle: unique.length === 1 ? tvMeasureLabel(vm, unique[0].ci) : "Value" });
+        spec.stacked = false;                      // the circle sits on the bar end, never on top of it
+        spec.legend = unique.length > 1;
+        return [spec];
+      }
+      // e.g. area + line of the same measure: overlay both, sharing one axis
+      const series = [];
+      axisMarks.forEach((token, k) => unique.forEach((m, i) => series.push({
+        name: tvMeasureLabel(vm, m.ci) + (k ? " " : ""), values: tvSum(vm, cats, m.ci), labels: k === axisCount - 1 && tvLabelsOn(roles, m.ref),
+        color: (color && color.measureNames && scale ? scale(vm.cols[m.ci].name, i) : null) || tvHex(TABLEAU_10[i % TABLEAU_10.length]),
+        ...tvSeriesType(token)
+      })));
+      const spec = make(series, { numFmt: tvNumFmt(vm, unique[0].ci), valueTitle: unique.length === 1 ? tvMeasureLabel(vm, unique[0].ci) : "Value" });
+      spec.stacked = false;
+      spec.legend = unique.length > 1;
+      return [spec];
+    }
+    measures.splice(0, measures.length, ...unique);
+
+    // funnel: one category per measure, each row carries exactly one of the measures
+    // (per-stage calcs) → one value per stage, drawn centred
+    const exclusive = catDims.length === 1 && measures.length > 1 && type.type === "bar" &&
+      vm.rows.every(r => measures.filter(m => tfDvNum(r[m.ci]) !== null).length <= 1);
+    if (exclusive) return tvFunnelSpecFromStages(ctx, cats, catDims[0].ci, measures, horizontal);
+
     if (mnCategory) {
       const values = measures.map(m => vm.rows.reduce((s, r) => s + (tfDvNum(r[m.ci]) || 0), 0));
       const pc = color && color.measureNames && scale ? measures.map((m, i) => scale(vm.cols[m.ci].name, i)) : undefined;
@@ -475,6 +531,32 @@ function tvCartesianSpecs(ctx) {
   const series = measures.map((m, i) => ({ name: tvMeasureLabel(vm, m.ci), values: tvSum(vm, cats, m.ci),
     color: tvHex(TABLEAU_10[i % TABLEAU_10.length]), labels: tvLabelsOn(roles, m.ref), ...tvSeriesType(marks[i]) }));
   return [make(series, { numFmt: tvNumFmt(vm, measures[0].ci), valueTitle: "Value" })];
+}
+
+/* ── funnel: stages = categories with one value each → stacked bars of an
+ *    invisible half-gap + the value, so every stage is centred ─────────────── */
+function tvFunnelSpecFromStages(ctx, cats, catCi, measures, horizontal) {
+  const { vm, roles } = ctx;
+  const values = new Array(cats.count).fill(null);
+  vm.rows.forEach(r => {
+    const i = cats.indexOf(r);
+    if (i === undefined) return;
+    measures.forEach(m => { const n = tfDvNum(r[m.ci]); if (n !== null) values[i] = (values[i] || 0) + n; });
+  });
+  const max = Math.max(0, ...values.filter(v => v !== null));
+  const scale = tvColorScale(vm, roles, "bar");
+  const pointColors = scale && roles.color && roles.color.ci === catCi
+    ? cats.levels[0].map((v, i) => scale(v) || tvHex(TABLEAU_10[i % TABLEAU_10.length])) : undefined;
+  return [{
+    ...tvBaseSpec(vm), kind: "bar", barDir: horizontal ? "bar" : "col", stacked: true, gapWidth: 15, legend: false,
+    gridlines: false, valueAxisHidden: true,
+    categories: { names: [tvMeasureLabel(vm, catCi)], levels: cats.levels }, categoryTitle: "",
+    numFmt: tvNumFmt(vm, measures[0].ci), valueTitle: "",
+    series: [
+      { name: "Offset", type: "bar", values: values.map(v => v === null ? null : (max - v) / 2), color: null, labels: false },
+      { name: tvMeasureLabel(vm, catCi), type: "bar", values, color: tvMarkColor(roles), pointColors, labels: roles.labelRefs.length > 0 }
+    ]
+  }];
 }
 
 /* ── histogram: the bar chart with touching bars ─────────────────────────── */

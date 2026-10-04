@@ -1427,7 +1427,8 @@ function buildViewModel(model, sheetName, summary, opts = {}) {
     const byMeasure = fmt.measureSortFor(ref);
     let mi = -1;
     if (byMeasure) mi = cols.findIndex(c => c.ref && tfSameField(c.ref, byMeasure.measure));
-    sortLevels.push({ ci, manual, byMeasure: mi >= 0 ? byMeasure : null, mi });
+    // sort measure not in the summary data (e.g. a funnel sorted by a hidden field) → the row's own total
+    sortLevels.push({ ci, manual, byMeasure, mi });
   });
   if (sortLevels.length) {
     // measure sort aggregates the measure over the rows sharing the same outer path
@@ -1436,7 +1437,9 @@ function buildViewModel(model, sheetName, summary, opts = {}) {
       const m = new Map();
       rows.forEach(r => {
         const k = sortLevels.slice(0, L + 1).map(x => tfDvText(r[x.ci])).join("\u0001");
-        m.set(k, (m.get(k) || 0) + (tfDvNum(r[lvl.mi]) || 0));
+        const v = lvl.mi >= 0 ? tfDvNum(r[lvl.mi])
+          : cols.reduce((s, c, i) => s + (!c.isHeader && tfDvNum(r[i]) !== null ? tfDvNum(r[i]) : 0), 0);
+        m.set(k, (m.get(k) || 0) + (v || 0));
       });
       return m;
     });
@@ -1746,7 +1749,15 @@ function inferExcelNumFmt(formatted, value) {
       if (unit === "%" && Math.abs(Math.abs(value) - p.n) <= tol) plainPercent = true; // value already ×100
       else continue;
     }
-    let body = (p.grouped ? "#,##0" : "0") + (p.decimals ? "." + "0".repeat(p.decimals) : "");
+    // Tableau's "Automatic" format pads to ~6 significant digits ("348.000", "4.50000",
+    // "24.86108%"); 3+ decimals are that padding, not a chosen format → keep what the value needs
+    let decimals = p.decimals;
+    if (decimals >= 3) {
+      const frac = (String(p.n).split(".")[1] || "").length;
+      decimals = Math.min(decimals, frac);
+      if (decimals >= 3) decimals = Math.max(0, Math.min(decimals, 2 - Math.floor(Math.log10(Math.abs(p.n) || 1))));
+    }
+    let body = (p.grouped ? "#,##0" : "0") + (decimals ? "." + "0".repeat(decimals) : "");
     const q = t => t ? '"' + t.replace(/"/g, '""') + '"' : "";
     let rest = suffix;
     if (unit === "%" && !plainPercent) { body += "%"; rest = suffix.replace("%", ""); }
@@ -1926,6 +1937,19 @@ if (typeof module !== "undefined" && module.exports) {  // lets you unit-test th
     label.title = match && match.missing.length ? "Not found in the workbook:\n" + match.missing.join("\n") : "";
     label.classList.toggle("status-warning", !!warning);
     if (warning) console.warn("[Workbook]", warning, match);
+  }
+
+  /* progress / outcome line under the Export button */
+  function setExportStatus(text, warning) {
+    const target = document.getElementById("export_status");
+    if (!target) return;
+    target.textContent = text;
+    target.title = "";
+    target.classList.toggle("status-warning", !!warning);
+  }
+  function appendExportStatus(text) {
+    const target = document.getElementById("export_status");
+    if (target && target.textContent) target.textContent += " · " + text;
   }
 
   function updateVisualStatus(statuses, note) {
@@ -2198,7 +2222,9 @@ if (typeof module !== "undefined" && module.exports) {  // lets you unit-test th
           appliedValues.forEach(v => filterData.values.add(v));
           value = appliedValues.join(", ");
         } else if (filter.filterType === "range") {
-          value = (filter.minValue?.formattedValue || "") + " - " + (filter.maxValue?.formattedValue || "");
+          // date ranges arrive as "6/1/2025 12:00:00 AM" – a midnight time is not part of the filter
+          const end = v => String((v && v.formattedValue) || "").replace(/\s+12:00:00\s*AM$|\s+00:00:00$/i, "");
+          value = end(filter.minValue) + " - " + end(filter.maxValue);
           filterData.values.add(value);
         } else {
           value = filter.filterType;
@@ -2435,9 +2461,88 @@ if (typeof module !== "undefined" && module.exports) {  // lets you unit-test th
   }
 
   /* =============================================================================
+   * Workbook file handle – the save dialog opens in the loaded workbook's folder.
+   * Pages cannot read a file's path, but a FileSystemFileHandle from showOpenFilePicker
+   * can be passed to showSaveFilePicker({ startIn }). It is kept in IndexedDB so the
+   * next Tableau session still starts there. Runtimes without the File System Access
+   * API keep the plain <input type="file"> + download behaviour.
+   * ============================================================================= */
+  let workbookFileHandle = null;
+  const HANDLE_DB = "mark2table", HANDLE_STORE = "handles", HANDLE_KEY = "workbook";
+
+  function openHandleDb() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(HANDLE_DB, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore(HANDLE_STORE);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+  async function storeWorkbookHandle(handle) {
+    try {
+      const db = await openHandleDb();
+      db.transaction(HANDLE_STORE, "readwrite").objectStore(HANDLE_STORE).put(handle, HANDLE_KEY);
+    } catch (e) {
+      console.warn("[Workbook] could not remember the workbook folder:", e.message);
+    }
+  }
+  /* parsed workbook model: Tableau's extension settings cannot hold a large model
+   * (saveAsync fails) and it would be lost on the next reload → keep a copy here too */
+  async function storeFormatModel(fileName, model, titleMap) {
+    try {
+      const db = await openHandleDb();
+      db.transaction(HANDLE_STORE, "readwrite").objectStore(HANDLE_STORE).put({ fileName, model, titleMap }, "formatModel");
+    } catch (e) {
+      console.warn("[Workbook] could not keep the workbook formatting in browser storage:", e.message);
+    }
+  }
+  async function restoreFormatModel() {
+    try {
+      const db = await openHandleDb();
+      return await new Promise(resolve => {
+        const req = db.transaction(HANDLE_STORE).objectStore(HANDLE_STORE).get("formatModel");
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => resolve(null);
+      });
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function restoreWorkbookHandle() {
+    try {
+      const db = await openHandleDb();
+      return await new Promise(resolve => {
+        const req = db.transaction(HANDLE_STORE).objectStore(HANDLE_STORE).get(HANDLE_KEY);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => resolve(null);
+      });
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /* =============================================================================
    * loadWorkbookFile() - Loads .twb/.twbx and parses BOTH titles AND colors
    * ============================================================================= */
   async function loadWorkbookFile() {
+    if (typeof window.showOpenFilePicker === "function") {
+      try {
+        const [handle] = await window.showOpenFilePicker({
+          types: [{ description: "Tableau workbook", accept: { "application/octet-stream": [".twb", ".twbx"] } }]
+        });
+        const file = await handle.getFile();
+        const titleMap = await readWorkbookFile(file);
+        if (Object.keys(titleMap).length || FORMAT_MODEL_CACHE) {
+          workbookFileHandle = handle;
+          await storeWorkbookHandle(handle);
+        }
+        return titleMap;
+      } catch (err) {
+        if (err && err.name === "AbortError") return {};            // picker cancelled
+        console.warn("[loadWorkbookFile] file picker unavailable, using file input:", err && err.message);
+      }
+    }
     return new Promise((resolve) => {
       const input = document.createElement("input");
       input.type = "file";
@@ -2447,85 +2552,13 @@ if (typeof module !== "undefined" && module.exports) {  // lets you unit-test th
 
       input.onchange = async (event) => {
         document.body.removeChild(input);
-
         const file = event.target.files[0];
         if (!file) {
           console.log("[loadWorkbookFile] No file selected");
           resolve({});
           return;
         }
-
-        console.log(`[loadWorkbookFile] Reading: ${file.name}`);
-
-        try {
-          let xmlString;
-          const ext = file.name.split(".").pop().toLowerCase();
-
-          if (ext === "twb") {
-            xmlString = await new Promise((res, rej) => {
-              const reader = new FileReader();
-              reader.onload = (e) => res(e.target.result);
-              reader.onerror = () => rej(new Error("FileReader failed reading .twb"));
-              reader.readAsText(file, "utf-8");
-            });
-          } else if (ext === "twbx") {
-            const arrayBuffer = await new Promise((res, rej) => {
-              const reader = new FileReader();
-              reader.onload = (e) => res(e.target.result);
-              reader.onerror = () => rej(new Error("FileReader failed reading .twbx"));
-              reader.readAsArrayBuffer(file);
-            });
-
-            if (typeof JSZip === "undefined") {
-              throw new Error("JSZip not loaded. Add the JSZip script tag to index.html.");
-            }
-
-            const zip = await JSZip.loadAsync(arrayBuffer);
-            const twbEntry = Object.values(zip.files).find(
-              f => !f.dir && /\.twb$/i.test(f.name)
-            );
-
-            if (!twbEntry) {
-              const entries = Object.values(zip.files).filter(f => !f.dir).map(f => f.name).slice(0, 20);
-              throw new Error(`No .twb file found inside the .twbx archive. Entries: ${entries.join(", ") || "none"}`);
-            }
-
-            xmlString = await twbEntry.async("string");
-          } else {
-            throw new Error(`Unsupported file type ".${ext}". Please select a .twb or .twbx file.`);
-          }
-
-          const titleMap = parseTwbXmlInBrowser(xmlString);
-          console.log(`[loadWorkbookFile] Parsed ${Object.keys(titleMap).length} titles`);
-
-          // ── NEW: one DOM-based pass extracts all formatting (fonts, colours, number formats…)
-          const formatModel = parseTableauFormatting(xmlString);
-          FORMAT_MODEL_CACHE = formatModel;
-          tableau.extensions.settings.set("twbTitleMap", JSON.stringify(titleMap));
-          try {
-            tableau.extensions.settings.set("twbFormatModel", JSON.stringify(formatModel));
-          } catch (e) {
-            console.warn("[loadWorkbookFile] Format model too large for settings – kept in memory only:", e.message);
-          }
-          tableau.extensions.settings.set("twbFileName", file.name);
-          try {
-            await tableau.extensions.settings.saveAsync();
-          } catch (e) {
-            console.warn("[loadWorkbookFile] settings.saveAsync failed (model kept in memory):", e.message);
-          }
-
-          const sheetCount = Object.keys(formatModel.sheets).length;
-          const colorCount = Object.values(formatModel.sheets).filter(s => s.panes.some(p => p.encodings.some(e => e.channel === "color"))).length;
-          showWorkbookLabel(file.name, `${Object.keys(titleMap).length} titles, formatting for ${sheetCount} sheets (${colorCount} with colour)`, formatModel);
-
-
-          resolve(titleMap);
-
-        } catch (err) {
-          console.error("[loadWorkbookFile] Error:", err.message);
-          alert(`Could not read workbook file:\n${err.message}`);
-          resolve({});
-        }
+        resolve(await readWorkbookFile(file));
       };
 
       input.oncancel = () => {
@@ -2535,6 +2568,109 @@ if (typeof module !== "undefined" && module.exports) {  // lets you unit-test th
 
       input.click();
     });
+  }
+
+  /* parses a picked .twb/.twbx: titles + format model, saved to the extension settings */
+  async function readWorkbookFile(file) {
+    console.log(`[loadWorkbookFile] Reading: ${file.name}`);
+
+    try {
+      let xmlString;
+      const ext = file.name.split(".").pop().toLowerCase();
+
+      if (ext === "twb") {
+        xmlString = await new Promise((res, rej) => {
+          const reader = new FileReader();
+          reader.onload = (e) => res(e.target.result);
+          reader.onerror = () => rej(new Error("FileReader failed reading .twb"));
+          reader.readAsText(file, "utf-8");
+        });
+      } else if (ext === "twbx") {
+        const arrayBuffer = await new Promise((res, rej) => {
+          const reader = new FileReader();
+          reader.onload = (e) => res(e.target.result);
+          reader.onerror = () => rej(new Error("FileReader failed reading .twbx"));
+          reader.readAsArrayBuffer(file);
+        });
+
+        if (typeof JSZip === "undefined") {
+          throw new Error("JSZip not loaded. Add the JSZip script tag to index.html.");
+        }
+
+        const zip = await JSZip.loadAsync(arrayBuffer);
+        const twbEntry = Object.values(zip.files).find(
+          f => !f.dir && /\.twb$/i.test(f.name)
+        );
+
+        if (!twbEntry) {
+          const entries = Object.values(zip.files).filter(f => !f.dir).map(f => f.name).slice(0, 20);
+          throw new Error(`No .twb file found inside the .twbx archive. Entries: ${entries.join(", ") || "none"}`);
+        }
+
+        xmlString = await twbEntry.async("string");
+      } else {
+        throw new Error(`Unsupported file type ".${ext}". Please select a .twb or .twbx file.`);
+      }
+
+      const titleMap = parseTwbXmlInBrowser(xmlString);
+      console.log(`[loadWorkbookFile] Parsed ${Object.keys(titleMap).length} titles`);
+
+      // ── NEW: one DOM-based pass extracts all formatting (fonts, colours, number formats…)
+      const formatModel = parseTableauFormatting(xmlString);
+      FORMAT_MODEL_CACHE = formatModel;
+      await storeFormatModel(file.name, formatModel, titleMap);
+      tableau.extensions.settings.set("twbTitleMap", JSON.stringify(titleMap));
+      try {
+        tableau.extensions.settings.set("twbFormatModel", JSON.stringify(formatModel));
+      } catch (e) {
+        try { tableau.extensions.settings.erase("twbFormatModel"); } catch (e2) { /* nothing saved */ }
+        console.warn("[loadWorkbookFile] Format model too large for settings – kept in memory only:", e.message);
+      }
+      tableau.extensions.settings.set("twbFileName", file.name);
+      try {
+        await tableau.extensions.settings.saveAsync();
+      } catch (e) {
+        console.warn("[loadWorkbookFile] settings.saveAsync failed (model kept in memory):", e.message);
+      }
+
+      const sheetCount = Object.keys(formatModel.sheets).length;
+      const colorCount = Object.values(formatModel.sheets).filter(s => s.panes.some(p => p.encodings.some(e => e.channel === "color"))).length;
+      showWorkbookLabel(file.name, `${Object.keys(titleMap).length} titles, formatting for ${sheetCount} sheets (${colorCount} with colour)`, formatModel);
+
+      return titleMap;
+
+    } catch (err) {
+      console.error("[loadWorkbookFile] Error:", err.message);
+      alert(`Could not read workbook file:\n${err.message}`);
+      return {};
+    }
+  }
+
+  /* Asks where to save BEFORE the export runs: the picker needs the click's user
+   * activation, which the data fetch would outlast. → handle, null (no picker API /
+   * picker failed → plain download), or "cancelled". */
+  async function chooseSaveTarget(suggestedName) {
+    if (typeof window.showSaveFilePicker !== "function") return null;
+    const options = {
+      suggestedName,
+      types: [{ description: "Excel workbook",
+                accept: { "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"] } }]
+    };
+    if (!workbookFileHandle) workbookFileHandle = await restoreWorkbookHandle();
+    try {
+      return await window.showSaveFilePicker(workbookFileHandle ? { ...options, startIn: workbookFileHandle } : options);
+    } catch (err) {
+      if (err && err.name === "AbortError") return "cancelled";
+      if (workbookFileHandle) {
+        try {                                   // stale handle (file moved / deleted) → default folder
+          return await window.showSaveFilePicker(options);
+        } catch (err2) {
+          if (err2 && err2.name === "AbortError") return "cancelled";
+        }
+      }
+      console.warn("[Export] save dialog unavailable, using browser download:", err && err.message);
+      return null;
+    }
   }
 
 
@@ -2562,6 +2698,16 @@ if (typeof module !== "undefined" && module.exports) {  // lets you unit-test th
       FORMAT_MODEL_CACHE = saved ? JSON.parse(saved) : null;
     } catch (err) {
       console.warn("[getFormatModel] Could not read settings:", err.message);
+    }
+    return FORMAT_MODEL_CACHE;
+  }
+  async function ensureFormatModel() {
+    if (getFormatModel()) return FORMAT_MODEL_CACHE;
+    const saved = await restoreFormatModel();
+    const fileName = tableau.extensions.settings.get("twbFileName");
+    if (saved && saved.model && (!fileName || saved.fileName === fileName)) {
+      FORMAT_MODEL_CACHE = saved.model;
+      console.log(`[Workbook] formatting for ${saved.fileName} restored from browser storage`);
     }
     return FORMAT_MODEL_CACHE;
   }
@@ -2973,9 +3119,16 @@ if (typeof module !== "undefined" && module.exports) {  // lets you unit-test th
         const savedFormat = tableau.extensions.settings.get("twbFormatModel");
         if (savedFileName && savedTitleMap) {
           const titleCount = Object.keys(JSON.parse(savedTitleMap)).length;
-          const savedModel = savedFormat ? JSON.parse(savedFormat) : null;
-          const sheetCount = savedModel ? Object.keys(savedModel.sheets || {}).length : 0;
-          showWorkbookLabel(savedFileName, `${titleCount} titles, formatting for ${sheetCount} sheets`, savedModel);
+          if (savedFormat) FORMAT_MODEL_CACHE = JSON.parse(savedFormat);
+          ensureFormatModel().then(model => {
+            if (model) {
+              showWorkbookLabel(savedFileName, `${titleCount} titles, formatting for ${Object.keys(model.sheets || {}).length} sheets`, model);
+            } else {
+              fileLabel.textContent = `${savedFileName} — formatting not available after reload.
+⚠ Click 📁 Load Workbook again so charts are exported as charts`;
+              fileLabel.classList.add("status-warning");
+            }
+          });
         } else {
           fileLabel.textContent = "No workbook loaded — click 📁 to load titles and colors";
         }
@@ -2991,15 +3144,23 @@ if (typeof module !== "undefined" && module.exports) {  // lets you unit-test th
   btn.disabled = true;
 
   try {
+    const now = new Date();
+    const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}`;
+    const exportFileName = `${(dashboard.name || "Dashboard Export").replace(/[\\\/\*\?\[\]:]/g, "").slice(0, 31)}_${stamp}.xlsx`;
+    setExportStatus("Choose where to save the Excel file…");
+    const saveTarget = await chooseSaveTarget(exportFileName);       // opens in the loaded workbook's folder
+    if (saveTarget === "cancelled") { setExportStatus("Export cancelled – no file was saved"); return; }
+
     const filterValuesMap = await extractFilterValuesPerField(sheets);
     console.log("📊 Filter values per field:", filterValuesMap);
 
     const titleMap = getTitleMap();
     console.log(`[Export] Using ${Object.keys(titleMap).length} titles`);
 
-    const fmtModel = getFormatModel();
+    const fmtModel = await ensureFormatModel();
     console.log(`[Export] Format model: ${fmtModel ? Object.keys(fmtModel.sheets).length + " sheets" : "none – load the workbook for exact formatting"}`);
-    const workbookWarning = describeWorkbookMatch(checkWorkbookMatch(fmtModel, dashboard));
+    const workbookWarning = fmtModel ? describeWorkbookMatch(checkWorkbookMatch(fmtModel, dashboard))
+      : "⚠ Workbook not loaded – charts can only be recognised from the workbook, so they may be exported as tables. Click 📁 Load Workbook, then export again";
     if (workbookWarning) console.warn("[Export]", workbookWarning);
 
     const layoutMap = buildLayoutMap(dashboard.objects || [], titleMap);
@@ -3014,6 +3175,7 @@ if (typeof module !== "undefined" && module.exports) {  // lets you unit-test th
     console.log("[DZV] Visibility map:", dzvMap);
 
     // ── 2. Fetch all sheets in parallel ──
+    setExportStatus(`Reading ${sheets.length} worksheets from Tableau…`);
     const allSheetsData = await fetchAllSheetsData(sheets);
 
     const filterValueItems = [];
@@ -3380,6 +3542,7 @@ while (FORMAT_CONFIG.groupOverflowRows && snapChanged && snapPass < MAX_SNAP_PAS
     setColumnWidths(worksheet, colWidths, exactWidths);
     applyAutoFilters(worksheet, allTablesInfo);
 
+    setExportStatus("Building the Excel file…");
     let buffer = await workbook.xlsx.writeBuffer();
     if (chartJobs.length) {
       // keep every chart inside its own block now that the final column widths/row heights are known
@@ -3405,20 +3568,25 @@ while (FORMAT_CONFIG.groupOverflowRows && snapChanged && snapPass < MAX_SNAP_PAS
       }
     }
     const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-    const now = new Date();
-    const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}`;
-    const fname = `${sheetName}_${stamp}.xlsx`;
-
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = fname;
-    link.click();
-    URL.revokeObjectURL(link.href);
+    if (saveTarget) {
+      const writable = await saveTarget.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      console.log(`[Export] saved to ${saveTarget.name}`);
+      appendExportStatus(`saved as ${saveTarget.name}`);
+    } else {
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = exportFileName;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    }
 
     console.log("✅ Export completed with Tableau formatting (fonts, colours, number formats, borders)");
 
   } catch (err) {
     console.error("[Export]", err);
+    setExportStatus("Export failed: " + err.message, true);
     alert("Export failed. Check console (F12) for details.\n\n" + err.message);
   } finally {
     btn.disabled = false;
