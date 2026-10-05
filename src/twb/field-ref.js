@@ -22,6 +22,14 @@ export function tfParseFieldRef(ref) {
   return { raw: ref, ds, deriv, name, type, inner };
 }
 
+/** a quick table calculation's measure: "[cum:sum:Sales:qk:7]" (running total) → "[sum:Sales:qk]"; null for any
+ * other field @param {FieldRef} ref @returns {FieldRef | null} */
+export function tfTableCalcBase(ref) {
+  if (!ref || !ref.deriv || !ref.type || !/^(sum|avg|cnt|ctd|min|max|med|attr|usr|std|stdp|var|varp|none):/i.test(ref.name || "")) return null;
+  const inner = `${ref.name}:${ref.type}`;
+  return tfParseFieldRef(ref.ds ? `[${ref.ds}].[${inner}]` : `[${inner}]`);
+}
+
 /** @param {string} text @returns {FieldRef[]} */
 export function tfExtractRefs(text) {
   if (!text) return [];

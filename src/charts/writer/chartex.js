@@ -32,7 +32,7 @@ export function chartExXml(spec, refs, uid) {
       (s.labelParts && s.labelParts.value ? `<cx:separator>${"\n"}</cx:separator>` : "") + `</cx:dataLabels>` : "") +
     `<cx:dataId val="0"/><cx:layoutPr><cx:parentLabelLayout val="${levels.length > 1 ? "banner" : "none"}"/></cx:layoutPr>` +
     `</cx:series></cx:plotAreaRegion></cx:plotArea></cx:chart>` +
-    `<cx:spPr>${solid(spec.background || "FFFFFF")}<a:ln><a:noFill/></a:ln></cx:spPr></cx:chartSpace>`;
+    `<cx:spPr>${spec.background === null ? "<a:noFill/>" : solid(spec.background || "FFFFFF")}<a:ln><a:noFill/></a:ln></cx:spPr></cx:chartSpace>`;
 }
 
 /* chartex frames sit in mc:AlternateContent; older Excel shows the fallback rectangle */

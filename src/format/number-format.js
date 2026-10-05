@@ -19,6 +19,53 @@ export function tableauToExcelNumFmt(raw) {
   return /[0#]/.test(res) ? res : null;
 }
 
+/**
+ * A number as Excel shows it in a format, for text Excel does not format itself (label texts taken from
+ * cells): literal text, digits with thousands separators, decimals (0 required, # optional), thousands
+ * scaling (trailing commas: ,, = millions), percent; sections positive;negative;zero.
+ * @param {number} value @param {string} fmt Excel number format @returns {string}
+ */
+export function tfFormatNumber(value, fmt) {
+  if (typeof value !== "number" || !isFinite(value)) return value == null ? "" : String(value);
+  const secs = tfSplitSections(String(fmt || "General")) || ["General"];
+  let sec = secs[0], sign = value < 0 ? "-" : "";
+  if (value < 0 && secs.length > 1) { sec = secs[1]; sign = ""; }   // the negative section shows the size
+  else if (value === 0 && secs.length > 2) sec = secs[2];
+  const x = Math.abs(value);
+  let pre = "", post = "", pattern = "", phase = 0;                 // 0 before the number, 1 in it, 2 after
+  const text = t => { if (phase === 1) phase = 2; if (phase === 0) pre += t; else post += t; };
+  for (let i = 0; i < sec.length; i++) {
+    const ch = sec[i];
+    if (ch === '"') { const j = sec.indexOf('"', i + 1); text(sec.slice(i + 1, j < 0 ? sec.length : j)); i = j < 0 ? sec.length : j; }
+    else if (ch === "\\") { text(sec[i + 1] || ""); i++; }
+    else if (ch === "[") { const j = sec.indexOf("]", i); i = j < 0 ? sec.length : j; }      // [Red], [>100]
+    else if (ch === "_") { text(" "); i++; }                                                 // _) = a space
+    else if (ch === "*") i++;                                                                 // fill character
+    else if (/[0#?.,%]/.test(ch) && phase < 2) { phase = 1; pattern += ch; }
+    else if (/general/i.test(sec.slice(i, i + 7)) && phase === 0) { pattern = "G"; phase = 1; i += 6; }
+    else text(ch);
+  }
+  if (pattern === "G" || !/[0#?]/.test(pattern)) {
+    return sign + pre + (pattern === "G" ? String(+x.toPrecision(10)) : "") + post;
+  }
+  const pct = (pattern.match(/%/g) || []).length;
+  const p = pattern.replace(/%/g, "");
+  const dot = p.indexOf(".");
+  let ip = dot >= 0 ? p.slice(0, dot) : p, dp = dot >= 0 ? p.slice(dot + 1) : "";
+  let scale = 0;                                                   // commas after the last digit: ÷ 1000 each
+  const it = ip.match(/,+$/); if (it) { scale += it[0].length; ip = ip.slice(0, -it[0].length); }
+  const dt = dp.match(/,+$/); if (dt) { scale += dt[0].length; dp = dp.slice(0, -dt[0].length); }
+  const minDec = (dp.match(/0/g) || []).length, maxDec = (dp.match(/[0#?]/g) || []).length;
+  let s = (x / Math.pow(1000, scale) * Math.pow(100, pct)).toFixed(maxDec);
+  if (maxDec > minDec) s = s.replace(new RegExp(`0{1,${maxDec - minDec}}$`), "").replace(/\.$/, "");
+  let [whole, frac] = s.split(".");
+  const minInt = (ip.match(/0/g) || []).length;
+  if (whole.length < minInt) whole = whole.padStart(minInt, "0");
+  if (!minInt && whole === "0" && frac) whole = "";
+  if (ip.includes(",")) whole = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return sign + pre + whole + (frac ? "." + frac : "") + "%".repeat(pct) + post;
+}
+
 /** an Excel number format with literal text around the number in every section ("4.0" → "4.0 DAYS")
  * @param {string} fmt @param {string} prefix @param {string} suffix @returns {string} */
 export function tfWrapNumFmt(fmt, prefix, suffix) {

@@ -10,10 +10,12 @@ import { KPI_GUTTER, buildKpiCard, buildTextCard, writeKpiCard } from "./kpi-car
 import { tfStrokeToBorder, tfZoneText } from "../twb/dashboard-text.js";
 import { tfExcelFill } from "../format/excel-style.js";
 import { tfDashboardTitleRuns } from "../twb/dashboard-text.js";
-import { tfCollect, tfMerge } from "../twb/formatter.js";
+import { tfCollect, tfDashboardShading, tfMerge } from "../twb/formatter.js";
+import { backgroundPlan } from "./backgrounds.js";
 import { appendExportStatus, setExportStatus, updateVisualStatus } from "../ui/status.js";
 import { chooseSaveTarget, ensureFormatModel, formatModelFileName, getTitleMap, getWorkbookImages } from "../ui/workbook-store.js";
 import { classifyImageObjects, fitImage, imageInfo, nativeAnchor, prepareImage, webLink } from "./images.js";
+import { tvIconSheet } from "../visual/icon-sheet.js";
 import { isKPIViewModel } from "../visual/classify.js";
 import { renderTableauImage } from "../visual/image-renderer.js";
 import { VISUAL_RENDERERS, buildVisualModel, chooseVisualRenderer, imageOrFallback } from "../visual/visual-model.js";
@@ -70,6 +72,8 @@ export async function exportToExcel() {
     setExportStatus(`Reading ${sheets.length} worksheets from Tableau…`);
     const allSheetsData = await fetchAllSheetsData(sheets);
 
+    /** @type {{ name: string, shape: string, layout: any }[]} button / icon sheets, drawn as their icon */
+    const iconSheets = [];
     /** @type {ExportItem[]} */
     const filterValueItems = [];
     /** @type {ExportItem[]} */
@@ -100,6 +104,14 @@ export async function exportToExcel() {
 
       const layout = layoutMap.get(sheet.name);
       const visualName = (layout && layout.displayName) ? layout.displayName : sheet.name;
+
+      // a button / icon sheet (a custom shape on empty shelves): drawn as its icon, not as a table of its flags
+      const icon = fmtModel ? tvIconSheet(fmtModel, sheet.name, summaryData) : null;
+      if (icon) {
+        if (icon.shape && layout) iconSheets.push({ name: sheet.name, shape: icon.shape, layout });
+        else console.log(`[Icons] ${sheet.name}: a Tableau shape – not exported`);
+        continue;
+      }
 
       if (isFilterValueWorksheet(sheet.name, summaryData)) {
         let matchedFilterName = null;
@@ -280,7 +292,7 @@ export async function exportToExcel() {
     //    a block of the layout, an icon over a sheet floats on that sheet's block, backgrounds are left out
     const imageKinds = classifyImageObjects(dashboard.objects || []);
     const imageObjects = (dashboard.objects || []).filter(o => o.type === "image" && o.isVisible !== false && imageKinds.has(String(o.id)));
-    const workbookImages = imageObjects.length ? await getWorkbookImages() : {};
+    const workbookImages = imageObjects.length || iconSheets.length ? await getWorkbookImages() : {};
     /** @type {ExportItem[]} */
     const imageItems = [];
     /** @type {(ImageBlock & { host: string, xPx: number, yPx: number })[]} */
@@ -301,6 +313,19 @@ export async function exportToExcel() {
       if (!layout) return;
       imageItems.push({ type: "image", name: `image:${o.id}`, visualName: zone.param, layout, image, columns: [],
         rowCount: Math.max(1, Math.round(o.size.height / EXCEL_ROW_PX)),
+        fixedGridW: layout.widthPx ? Math.max(1, layout.gridRight - layout.gridCol) : null });
+    });
+    // icon sheets: the shape centred in the sheet's zone at about Tableau's mark size
+    iconSheets.forEach(({ name, shape, layout }) => {
+      const file = workbookImages["shape:" + shape];
+      if (!file) { console.warn(`[Icons] ${name}: shape "${shape}" not in the loaded workbook`); return; }
+      const info = imageInfo(file.data, shape);
+      const w = layout.widthPx || 40, h = layout.heightPx || 40;
+      const box = Math.min(28, Math.max(12, Math.round(Math.min(w, h) * 0.5)));
+      if (!info.type) return;
+      imageItems.push({ type: "image", name, visualName: name, layout, columns: [],
+        image: { file, info, zone: { param: shape, scaled: true, centered: true }, url: null, widthPx: box, heightPx: box },
+        rowCount: Math.max(1, Math.round(h / EXCEL_ROW_PX)),
         fixedGridW: layout.widthPx ? Math.max(1, layout.gridRight - layout.gridCol) : null });
     });
     if (imageItems.length || overlayImages.length) console.log(`[Images] ${imageItems.length + overlayImages.length} image(s)`);
@@ -580,14 +605,58 @@ setTableVisibleRows(placedItems);
       for (let r = top; r <= bottom; r++) { edge(r, left, { left: side }); edge(r, right, { right: side }); }
     });
 
+    // dashboard shading, container / backdrop backgrounds and each object's own: the cells around and under
+    // the blocks take the colour Tableau shows there; cells a block coloured itself keep their colour
+    const dashColor = tfDashboardShading(fmtModel, dashboard.name);
+    const bgBlocks = adjustedItems.filter(it => it.layout && it.layout.id !== undefined).map(it => {
+      const zone = zoneById.get(String(it.layout.id));
+      const zoneBg = (zone && zone.style && zone.style.bgColor) || undefined;
+      // a worksheet draws its shading over its zone: its colour, Tableau's white, or see-through
+      const shading = it.type === "worksheet" && it.vm ? it.vm.fmt.sheetShading() : "none";
+      const own = shading === "none" ? zoneBg : shading || "white";
+      return { zoneId: String(it.layout.id), top: it.gridRow, left: it.gridCol,
+               bottom: it.gridRow + it.allocatedRows - 1, right: it.gridCol + it.gridW - 1, own };
+    });
+    // the dashboard's extent in px (its objects), for the size of zones given in 0–100000 units
+    const dashExt = (dashboard.objects || []).reduce((a, o) => o.position && o.size
+      ? { w: Math.max(a.w, o.position.x + o.size.width), h: Math.max(a.h, o.position.y + o.size.height) } : a, { w: 0, h: 0 });
+    if (bgBlocks.length && (dashColor || dashZones.some(z => z.style && z.style.bgColor))) {
+      const used = tracker.toRange();
+      const plan = backgroundPlan(dashZones, dashColor, bgBlocks,
+        { top: Math.min(...bgBlocks.map(b => b.top)), left: 0, bottom: used.e.r, right: used.e.c },
+        { w: (dashFmt && dashFmt.width) || dashExt.w || 1200, h: (dashFmt && dashFmt.height) || dashExt.h || 800 });
+      for (let r = 0; r <= used.e.r; r++) {
+        for (let c = 0; c <= used.e.c; c++) {
+          const color = plan.colorAt(r, c);
+          if (!color) continue;
+          const cell = worksheet.getCell(r + 1, c + 1);
+          const target = cell.isMerged ? cell.master : cell;
+          if (target.fill && target.fill.type === "pattern" && target.fill.pattern !== "none") continue;
+          target.style = { ...target.style, fill: tfExcelFill(color) };      // a style of its own, not shared
+        }
+      }
+      // dividers and accent lines: borders along the block edges and through the gaps, never across a block
+      plan.lines.forEach(ln => {
+        /** @type {Partial<import("exceljs").Border>} */
+        const side = { style: ln.style, color: { argb: ln.color } };
+        for (let k = ln.from; k <= ln.to; k++) {
+          const across = bgBlocks.some(b => ln.dir === "h" ? b.top < ln.at && ln.at <= b.bottom && k >= b.left && k <= b.right
+                                                         : b.left < ln.at && ln.at <= b.right && k >= b.top && k <= b.bottom);
+          if (across) continue;
+          const cell = ln.dir === "h" ? worksheet.getCell(ln.at + 1, k + 1) : worksheet.getCell(k + 1, ln.at + 1);
+          const key = ln.dir === "h" ? "top" : "left";
+          if (cell.border && cell.border[key]) continue;                   // a table's own rule stays
+          cell.style = { ...cell.style, border: { ...(cell.border || {}), [key]: side } };
+        }
+      });
+    }
+
     setColumnWidths(worksheet, colWidths, exactWidths);
     applyAutoFilters(worksheet, allTablesInfo);
     if (FORMAT_CONFIG.printFitToWidth) {
       // printing / Save as PDF: the whole dashboard, one page wide, oriented like the dashboard
-      const ext = (dashboard.objects || []).reduce((a, o) => o.position && o.size
-        ? { w: Math.max(a.w, o.position.x + o.size.width), h: Math.max(a.h, o.position.y + o.size.height) } : a, { w: 0, h: 0 });
       const used = tracker.toRange();
-      worksheet.pageSetup = { ...worksheet.pageSetup, orientation: ext.w >= ext.h ? "landscape" : "portrait",
+      worksheet.pageSetup = { ...worksheet.pageSetup, orientation: dashExt.w >= dashExt.h ? "landscape" : "portrait",
         fitToPage: true, fitToWidth: 1, fitToHeight: 0, horizontalCentered: true,
         margins: { left: 0.4, right: 0.4, top: 0.5, bottom: 0.5, header: 0.3, footer: 0.3 },
         printArea: `A$1:${getExcelColumnName(used.e.c)}$${used.e.r + 1}` };          // ExcelJS adds the column's $

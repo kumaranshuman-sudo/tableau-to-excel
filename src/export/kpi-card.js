@@ -105,7 +105,7 @@ export function buildKpiCard(vm, sheetName, layout) {
   const pad = layout && layout.heightPx ? Math.max(0, Math.round((layout.heightPx - used) / 20)) : 0;
   const vAlign = fmt.markCellStyle(null).vAlign || "middle";
   const padTop = vAlign === "top" ? 0 : vAlign === "bottom" ? pad : Math.floor(pad / 2);
-  const background = fmt.tableBackground(vm.dashboardName) || null;
+  const background = fmt.tableBackground();
   const widthPx = tiles.map(t => Math.max(60, ...t.lines.map(l =>
     l.segments.reduce((w, s) => w + textOf(s, vm).length * (s.props.fontSize || 9) * 4 / 3 * 0.58, 0) + 18)));
   return { title, tiles, background, padTop, padBottom: pad - padTop, lineHeightsPt,

@@ -3,7 +3,7 @@ import { TABLEAU_DEFAULTS, TF_DERIV_LABEL, TF_ELEMENTS } from "../config.js";
 import { tfArgb } from "../format/colors.js";
 import { tableauToExcelNumFmt } from "../format/number-format.js";
 import { tfStrokeToBorder } from "./dashboard-text.js";
-import { tfParseFieldRef, tfRefKey, tfSameField } from "./field-ref.js";
+import { tfParseFieldRef, tfRefKey, tfSameField, tfTableCalcBase } from "./field-ref.js";
 import { tfNorm, tfNum } from "../util.js";
 
 export function tfFormatsToProps(m) {
@@ -58,7 +58,7 @@ export function tfMerge(...layers) {
 
 export function tfFieldInfo(model, ref) {
   if (!model || !ref) return null;
-  const k = ref.name.toLowerCase();
+  const k = (tfTableCalcBase(ref) || ref).name.toLowerCase();      // a table calculation: its measure's field
   return model.fields[(ref.ds || "") + "|" + k] || model.fields["|" + k] || null;
 }
 
@@ -74,6 +74,13 @@ export function tfDisplayNames(model, ref) {
     Object.entries(model.measureAliases).find(([k]) => k.endsWith("|" + ref.inner.toLowerCase()))?.[1]);
   if (alias) names.unshift(alias);
   return [...new Set(names.map(tfNorm))];
+}
+
+/** Format → Dashboard → Dashboard Shading: the dashboard's canvas colour (ARGB), or null
+ * @param {FormatModel | null} model @param {string} dashboardName @returns {string | null} */
+export function tfDashboardShading(model, dashboardName) {
+  const dash = model && model.dashboards ? model.dashboards[dashboardName] : null;
+  return (dash && tfCollect(dash.style, ["table"]).bgColor) || null;
 }
 
 /** @param {FormatModel | null} model @param {string} sheetName */
@@ -238,14 +245,19 @@ export function createSheetFormatter(model, sheetName) {
     shelfOf,
     sheetModel: sheet,
 
-    /* Format → Shading → Worksheet: workbook < dashboard < worksheet */
-    tableBackground(dashboardName) {
-      const dash = dashboardName && model && model.dashboards ? model.dashboards[dashboardName] : null;
-      const v = [tfCollect(wb, ["table"]).bgColor, dash ? tfCollect(dash.style, ["table"]).bgColor : undefined,
-                 tfCollect(st, ["table"]).bgColor];
-      let out = null;
-      v.forEach(x => { if (x !== undefined) out = x; });       // later level wins; null = explicitly none
+    /** Format → Shading → Worksheet, workbook < worksheet: ARGB; "none" = switched off (what is behind the
+     * sheet shows); undefined = not set (Tableau draws the sheet white). A dashboard's shading colours the
+     * dashboard only – sheets on it keep their own (designers set them to match).
+     * @returns {string | undefined} */
+    sheetShading() {
+      let out;
+      [wb, st].forEach(s => { const x = s ? tfCollect(s, ["table"]).bgColor : undefined; if (x !== undefined) out = x === null ? "none" : x; });
       return out;
+    },
+    /** the worksheet's own background colour (ARGB), null when it has none (white or switched off) */
+    tableBackground() {
+      const s = this.sheetShading();
+      return s && s !== "none" ? s : null;
     },
     /* column-header height (px) stored on any Columns-shelf header field, incl. Measure Names */
     headerRowHeightPx() {
@@ -395,7 +407,17 @@ export function createSheetFormatter(model, sheetName) {
     },
     manualSortFor(ref) { return sheet ? sheet.manualSorts.find(m => tfSameField(m.field, ref)) : null; },
     measureSortFor(ref) { return sheet ? sheet.measureSorts.find(m => tfSameField(m.field, ref)) : null; },
+    /** the sheet's quick table calculations over a measure ("cum:sum:Sales:qk:7" over "sum:Sales:qk") */
+    tableCalcRefs(ref) {
+      return ref && sheet ? sheet.fieldRefs.filter(r => { const b = tfTableCalcBase(r); return !!b && tfSameField(b, ref); }) : [];
+    },
+    /** a running total (Quick Table Calculation → Running Total) */
+    isRunningTotal(ref) {
+      return !!ref && (/^(cum|rsum)$/i.test(ref.deriv || "") || (sheet ? (sheet.runningTotals || []) : []).some(t => tfSameField(t, ref)));
+    },
     captionFor(ref, fallbackName) {
+      const base = tfTableCalcBase(ref);                       // a running total is captioned as its measure
+      if (base) return this.captionFor(base, fallbackName);
       const info = tfFieldInfo(model, ref);
       let cap = info && info.caption ? info.caption
               : ref && !/^Calculation_/.test(ref.name) ? ref.name

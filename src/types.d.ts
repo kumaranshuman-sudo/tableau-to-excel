@@ -59,6 +59,8 @@ interface ParsedStyle {
   encodings: ColorEncoding[];
   /** Edit Axis settings (encoding attr="space") */
   spaces?: AxisSpace[];
+  /** Shape encodings: value (bucket key) → shape name */
+  shapes?: { field: FieldRef; map: Record<string, string> }[];
 }
 
 /** Edit Axis: fixed range ("fixed" / "fixedmin" / "fixedmax"), tick spacing, include zero */
@@ -392,7 +394,8 @@ interface RefLineStyle {
 interface ChartSpec {
   kind: ChartKind;
   font: { name: string; size: number; color: string };
-  background: string;
+  /** chart area colour; null = see-through (Worksheet shading "None") */
+  background: string | null;
   gridlines: boolean;
   legend?: boolean;
   /** bar charts: "col" = vertical, "bar" = horizontal */
@@ -446,6 +449,8 @@ interface ChartSpec {
   /** the worksheet's mark label font (hex colour) and, for bars, Excel's label position */
   labelFont?: { name?: string; size?: number; color?: string; bold?: boolean };
   labelPos?: "inBase" | "ctr" | "inEnd" | "outEnd";
+  /** false = labels may overlap (Tableau: "Allow labels to overlap other marks"); otherwise overlapping ones are left out */
+  labelCull?: boolean;
   /** reference lines across horizontal bars (drawn as vertical lines over the bars) */
   refLines?: RefLineStyle[];
   /** line chart drawn as a box plot: up/down bars + high-low lines */
@@ -497,7 +502,8 @@ interface WorkbookImage {
 interface ImageBlock {
   file: WorkbookImage;
   info: import("./export/images.js").ImageInfo;
-  zone: DashboardZone;
+  /** the image zone (Fit Image, Center Image, link); an icon sheet gives only what applies */
+  zone: Partial<DashboardZone>;
   url: string | null;
   widthPx: number;
   heightPx: number;

@@ -1,6 +1,7 @@
 /* Pie, scatter, waterfall, box plot, Gantt, treemap, symbol map and packed bubble chart specs. */
-import { TV_MAX_POINTS, TV_MAX_SERIES, tvBaseSpec, tvCategories, tvColorScale, tvColorValues, tvHex, tvLabelsOn, tvMarkColor, tvMeasureLabel, tvNumFmt, tvSum, tvText } from "./common.js";
+import { TV_MAX_POINTS, TV_MAX_SERIES, tvBaseSpec, tvCategories, tvColorScale, tvColorValues, tvHex, tvLabelsOn, tvMarkColor, tvMeasureLabel, tvNumFmt, tvPaneRule, tvSum, tvText } from "./common.js";
 import { tfDvNum, tfIsNull } from "../../data/values.js";
+import { tfFormatNumber } from "../../format/number-format.js";
 import { TABLEAU_10 } from "../../format/palettes.js";
 import { tfSameField } from "../../twb/field-ref.js";
 import { tvPackCircles } from "./packing.js";
@@ -111,16 +112,18 @@ export function tvAxisLayout(ctx) {
 }
 
 /* ── waterfall: Gantt bars sized by -measure on a running total →
- *    stacked columns: invisible base + increase / decrease ─────────────────── */
+ *    stacked columns: invisible base + increase / decrease, each step in its category's colour, and the
+ *    Text field written over each floating bar ─────────────────────────────── */
 /** @param {ChartContext} ctx @returns {ChartSpec[]} */
 export function tvWaterfallSpec(ctx) {
   const { vm, roles } = ctx;
-  const { horizontal, measure, catDims } = tvAxisLayout(ctx);
+  const { horizontal, measure, catDims, valueShelf } = tvAxisLayout(ctx);
+  const fieldLabels = vm.fmt.hasModel ? vm.fmt.fieldLabelsShown(valueShelf === "rows" ? "cols" : "rows") : true;
   const cats = tvCategories(vm, catDims.map(d => d.ci), catDims.some(d => d.continuous));
   if (cats.count > TV_MAX_POINTS) throw new Error(`${cats.count} categories – too many for an Excel chart`);
   const running = tvSum(vm, cats, measure.ci);
   if (running.some(v => v !== null && v < 0)) throw new Error("running total goes below zero – not drawable as stacked columns");
-  const base = [], up = [], down = [];
+  const base = [], up = [], down = [], ends = [];
   let prev = 0;
   running.forEach(v => {
     const cur = v === null ? prev : v;
@@ -128,29 +131,46 @@ export function tvWaterfallSpec(ctx) {
     base.push(Math.min(prev, cur));
     up.push(delta > 0 ? delta : null);
     down.push(delta < 0 ? -delta : null);
+    ends.push(Math.max(prev, cur));                             // the top of the floating bar
     prev = cur;
   });
   const markColor = tvMarkColor(roles);
   const scale = tvColorScale(vm, roles, "ganttbar");
-  // colour = a measure (usually the step itself) → colour each step; else Tableau's single mark colour
-  const stepColors = scale && roles.color && roles.color.continuous && roles.color.ci >= 0
-    ? tvSum(vm, cats, roles.color.ci).map(v => scale(v)) : null;
-  const labels = tvLabelsOn(roles, measure.ref);
+  // colour = the category (each step its own colour), or a measure (usually the step itself)
+  const colorLevel = roles.color && !roles.color.continuous ? catDims.findIndex(d => d.ci === roles.color.ci) : -1;
+  const stepColors = !scale ? null : colorLevel >= 0 ? cats.levels[colorLevel].map(v => scale(v))
+    : roles.color && roles.color.continuous && roles.color.ci >= 0 ? tvSum(vm, cats, roles.color.ci).map(v => scale(v)) : null;
   const label = tvMeasureLabel(vm, measure.ci);
   const numFmt = tvNumFmt(vm, measure.ci);
+  // mark labels: the Text field (the step, or the running total) over each bar; Excel writes stacked labels
+  // inside the bars, so an invisible line along the bar tops carries them above, as text in its format
+  const textCi = roles.labelRefs.map(r => vm.cols.findIndex(c => c.ref && tfSameField(c.ref, r))).find(i => i >= 0);
+  const labelCi = textCi === undefined ? measure.ci : textCi;
+  const labels = tvLabelsOn(roles, vm.cols[labelCi].ref);
+  const labelFmt = tvNumFmt(vm, labelCi);
+  const labelValues = labelCi === measure.ci ? running : tvSum(vm, cats, labelCi);
+  const above = labels && !horizontal;
   // decreases are drawn as positive heights but labelled as the negative step, like Tableau
   const positive = (numFmt.match(/^((?:"[^"]*"|[^;])*)/) || [])[1] || "General";
   const downFmt = positive === "General" ? "-General" : "-" + positive;
+  /** @type {ChartSeries[]} */
+  const series = [
+    { name: "Base", type: "bar", values: base, color: null, labels: false },
+    { name: label + " (increase)", type: "bar", values: up, color: markColor, pointColors: stepColors, labels: labels && !above },
+    { name: label + " (decrease)", type: "bar", values: down, color: markColor, pointColors: stepColors, labels: labels && !above, labelNumFmt: downFmt }
+  ];
+  if (above) {
+    series.push({ name: label + " (labels)", type: "line", values: ends, color: null, line: false, marker: false, labels: true,
+                  labelTexts: labelValues.map(v => v === null ? "" : tfFormatNumber(v, labelFmt)) });
+  }
   return [{
-    ...tvBaseSpec(vm), kind: "bar", barDir: horizontal ? "bar" : "col", stacked: true, gapWidth: 30, legend: false,
+    // Tableau's Gantt bars float thin, about as wide as the gaps between them
+    ...tvBaseSpec(vm), kind: "bar", barDir: horizontal ? "bar" : "col", stacked: true, gapWidth: 100, legend: false,
+    // "Allow labels to overlap other marks" off (Tableau's default): overlapping labels are left out
+    labelCull: !roles.panes.some(p => tvPaneRule(p, "mark", "mark-labels-cull") === "false"),
     categories: { names: catDims.length ? catDims.map(d => tvMeasureLabel(vm, d.ci)) : [""], levels: cats.levels },
-    categoryTitle: catDims.map(d => tvMeasureLabel(vm, d.ci)).join(" / "),
-    numFmt, valueTitle: label,
-    series: [
-      { name: "Base", type: "bar", values: base, color: null, labels: false },
-      { name: label + " (increase)", type: "bar", values: up, color: markColor, pointColors: stepColors, labels },
-      { name: label + " (decrease)", type: "bar", values: down, color: markColor, pointColors: stepColors, labels, labelNumFmt: downFmt }
-    ]
+    categoryTitle: fieldLabels ? catDims.map(d => tvMeasureLabel(vm, d.ci)).join(" / ") : "",
+    numFmt, valueTitle: label, series
   }];
 }
 

@@ -78,6 +78,38 @@ export function fitImage(natW, natH, boxW, boxH, scaled, centered) {
 
 const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+const B64_INDEX = (() => { const t = new Int16Array(128).fill(-1); for (let i = 0; i < 64; i++) t[B64.charCodeAt(i)] = i; return t; })();
+
+/** base64 text (line breaks, padding allowed) → bytes @param {string} text @returns {Uint8Array} */
+export function fromBase64(text) {
+  const s = String(text || ""), out = new Uint8Array(Math.ceil(s.length * 3 / 4));
+  let n = 0, buf = 0, bits = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i), v = c < 128 ? B64_INDEX[c] : -1;
+    if (v < 0) continue;                                         // white space, "="
+    buf = ((buf << 6) | v) & 0xffffff; bits += 6;
+    if (bits >= 8) { bits -= 8; out[n++] = (buf >> bits) & 255; }
+  }
+  return out.subarray(0, n);
+}
+
+/**
+ * The custom shapes embedded in the workbook (<external><shapes>: icons used by Shape marks), keyed
+ * "shape:<name>" next to the packaged images.
+ * @param {string} xmlString the .twb XML @returns {Record<string, WorkbookImage>}
+ */
+export function extractCustomShapes(xmlString) {
+  /** @type {Record<string, WorkbookImage>} */
+  const out = {};
+  const at = String(xmlString || "").lastIndexOf("<external>");
+  if (at < 0) return out;
+  const unescape = s => s.replace(/&apos;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+  const re = /<shape name=(?:'([^']*)'|"([^"]*)")\s*>([\s\S]*?)<\/shape>/g;
+  re.lastIndex = at;
+  for (let m = re.exec(xmlString); m; m = re.exec(xmlString)) out["shape:" + unescape(m[1] ?? m[2])] = { data: fromBase64(m[3]) };
+  return out;
+}
+
 /** @param {Uint8Array} bytes @returns {string} */
 export function toBase64(bytes) {
   let out = "";

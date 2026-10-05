@@ -87,7 +87,7 @@ export function writeRegularTable(worksheet, vm, originRow, originCol, rangeTrac
   if (!fmt.hasModel) console.log(`[Format] No TWB format info for "${vm.title.text}" – using Tableau defaults`);
 
   const plan = buildColorPlan(fmt, cols, rows);
-  const tableBg = fmt.tableBackground(vm.dashboardName) || null;   // Format → Shading → Worksheet
+  const tableBg = fmt.tableBackground();                       // Format → Shading → Worksheet
   const rowDiv = fmt.divider("rows");
   const colDiv = fmt.divider("cols");
   const band = fmt.banding();

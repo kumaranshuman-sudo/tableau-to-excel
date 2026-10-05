@@ -66,11 +66,21 @@ export function writeChartData(ws, spec, startRow) {
       if (v !== null) put(startRow + 1 + i, L + k, v, s.secondary ? spec.secondaryNumFmt : spec.numFmt);
     });
   }
+  // label texts taken from cells (Excel's "Value From Cells"), after the series columns
+  let lblCol = L + spec.series.length;
+  const lbl = spec.series.map(s => {
+    if (!s.labelTexts) return null;
+    const c = lblCol++;
+    put(startRow, c, s.name + " – label");
+    s.labelTexts.forEach((t, i) => put(startRow + 1 + i, c, t));
+    return cellRef(sheet, c, startRow + 1, c, startRow + Math.max(1, N));
+  });
   return {
     cat: cellRef(sheet, 0, startRow + 1, L - 1, startRow + N),
     series: spec.series.map((s, k) => ({
       tx: cellRef(sheet, L + k, startRow),
-      val: cellRef(sheet, L + k, startRow + 1, L + k, startRow + N)
+      val: cellRef(sheet, L + k, startRow + 1, L + k, startRow + N),
+      ...(lbl[k] ? { lbl: lbl[k] } : {})
     })),
     nextRow: startRow + N + 3
   };

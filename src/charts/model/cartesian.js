@@ -58,8 +58,11 @@ export function tvCartesianSpecs(ctx) {
     const stackable = series.every(s => s.type === "bar" || s.type === "area");
     const stacked = stackable && series.length > 1 &&
       ((colorCi >= 0 && colorLevel < 0) || (mvMode && color && color.measureNames && roles.measureNames !== catShelf));
+    // Tableau stacks columns in the colour legend's order from the top; Excel stacks its first series at the
+    // bottom → reversed (bars across keep the legend's order from the axis outwards)
+    const ordered = stacked && !horizontal ? [...series].reverse() : series;
     return { ...tvBaseSpec(vm), kind, barDir: horizontal ? "bar" : "col", stacked,
-             categories, categoryTitle, legend: series.length > 1, series, ...extra };
+             categories, categoryTitle, legend: series.length > 1, series: ordered, ...extra };
   };
 
   const axisIds = [...new Set(measures.map(m => m.axis || 0))].sort((a, b) => a - b);

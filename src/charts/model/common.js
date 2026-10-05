@@ -138,10 +138,17 @@ export function tvColorValues(vm, roles) {
   vm.rows.forEach(r => { const t = tvText(r[ci]); if (!seen.has(t)) seen.set(t, r[ci]); });
   let values = [...seen.keys()];
   const manual = roles.color.ref ? vm.fmt.manualSortFor(roles.color.ref) : null;
+  const byMeasure = !manual && roles.color.ref ? vm.fmt.measureSortFor(roles.color.ref) : null;
   if (manual) {
     const rank = new Map(manual.order.map((b, i) => [tfBucketKey(b), i]));
     values.sort((a, b) => (rank.has(tfNorm(a)) ? rank.get(tfNorm(a)) : 1e9) - (rank.has(tfNorm(b)) ? rank.get(tfNorm(b)) : 1e9));
     if (manual.direction === "DESC") values.reverse();
+  } else if (byMeasure) {
+    // sorted by a measure (Sort → Field: Value Ordered, ascending): its total per colour value
+    const mi = vm.cols.findIndex(c => c.ref && tfSameField(c.ref, byMeasure.measure));
+    const total = new Map(values.map(v => [v, 0]));
+    if (mi >= 0) vm.rows.forEach(r => { const t = tvText(r[ci]); total.set(t, (total.get(t) || 0) + (tfDvNum(r[mi]) || 0)); });
+    values.sort((a, b) => (total.get(a) - total.get(b)) * (byMeasure.direction === "DESC" ? -1 : 1) || tfNaturalCompare(seen.get(a), seen.get(b)));
   } else values.sort((a, b) => tfNaturalCompare(seen.get(a), seen.get(b)));
   return values;
 }
@@ -215,7 +222,8 @@ export function tvSum(vm, cats, valueCi, filter) {
 export function tvBaseSpec(vm) {
   return {
     font: tvChartFont(vm.fmt),
-    background: tvHex(vm.fmt.tableBackground(vm.dashboardName)) || "FFFFFF",
+    // Worksheet shading: its colour, none (see-through: the container shows) or Tableau's white
+    background: vm.fmt.sheetShading() === "none" ? null : tvHex(vm.fmt.tableBackground()) || "FFFFFF",
     gridlines: true
   };
 }

@@ -7,6 +7,33 @@ import { createSheetFormatter } from "../twb/formatter.js";
 import { tfBucketKey } from "../twb/parser.js";
 import { tfLog, tfNorm } from "../util.js";
 
+/* Tableau names a quick table calculation after its measure: a running sum and the plain sum both arrive as
+ * "SUM(Value Ordered)". Of the columns sharing a name, the one holding the calculation takes the sheet's
+ * table-calculation field: a running sum holds the plain column's grand total (its last value), a percent of
+ * total adds up to 1; otherwise the calculation is the first of them, as Tableau lists it (cum… before sum…). */
+function splitTableCalcColumns(cols, rows, fmt) {
+  const groups = new Map();
+  cols.forEach((c, i) => { if (c.ref) { const k = tfNorm(c.name); groups.set(k, [...(groups.get(k) || []), i]); } });
+  groups.forEach(idx => {
+    if (idx.length < 2 || !fmt.hasModel) return;
+    const calcs = fmt.tableCalcRefs(cols[idx[0]].ref);
+    if (!calcs.length) return;
+    const nums = i => rows.map(r => tfDvNum(r[i])).filter(v => v !== null);
+    const sum = i => nums(i).reduce((a, b) => a + b, 0);
+    const near = (a, b) => Math.abs(a - b) <= Math.max(1e-9, Math.abs(b) * 1e-6);
+    let free = [...idx];
+    calcs.forEach(calc => {
+      if (free.length < 2) return;
+      const test = fmt.isRunningTotal(calc) ? (i, j) => nums(i).some(v => near(v, sum(j)))
+                 : /^pcto$/i.test(calc.deriv || "") ? (i) => near(sum(i), 1) || near(sum(i), 100) : null;
+      let pick = test ? free.find(i => free.some(j => j !== i && test(i, j))) : undefined;
+      if (pick === undefined) pick = free[0];
+      cols[pick].ref = calc;
+      free = free.filter(i => i !== pick);
+    });
+  });
+}
+
 /**
  * @param {FormatModel | null} model
  * @param {string} sheetName
@@ -23,6 +50,7 @@ export function buildViewModel(model, sheetName, summary, opts = {}) {
     return { name, dataType: c.dataType, ref: fmt.matchName(name) };
   });
   let rows = (summary.data || []).map(r => r.slice());
+  splitTableCalcColumns(cols, rows, fmt);
 
   // ── 1. pivot Measure Names / Measure Values ─────────────────────────────
   const mnI = cols.findIndex(c => /^measure names$/i.test(c.name));

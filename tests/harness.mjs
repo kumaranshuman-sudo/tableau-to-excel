@@ -402,6 +402,128 @@ if (mode === "json") {
       '<sheetPr><outlinePr summaryBelow="0"/><pageSetUpPr fitToPage="1"/></sheetPr>', "sheet properties in the order Excel requires")
   ];
   print(`images: ${imageChecks.filter(Boolean).length}/${imageChecks.length} checks passed`);
+
+  // dashboard shading, containers with a background, see-through objects, dividers, hidden containers
+  const bgZones = [
+    { id: "1", type: "layout-flow", x: 0, y: 0, w: 100000, h: 100000, style: { bgColor: "FFF9FAFB" } },            // canvas container
+    { id: "2", type: "layout-flow", x: 0, y: 0, w: 100000, h: 10000, style: { bgColor: "FFFFFFFF" }, parent: "1" },  // header bar
+    { id: "3", type: "bitmap", x: 2000, y: 2000, w: 10000, h: 6000, parent: "2" },                                  // logo in it
+    { id: "4", type: "layout-flow", x: 50000, y: 20000, w: 45000, h: 70000, style: { bgColor: "FFFFFFFF" }, parent: "1" },   // white card
+    { id: "5", type: "worksheet", x: 51000, y: 21000, w: 43000, h: 68000, parent: "4" },                            // sheet on the card
+    { id: "6", type: "text", x: 2000, y: 20000, w: 40000, h: 10000, parent: "1" },                                  // see-through text
+    { id: "7", type: "empty", x: 0, y: 10000, w: 100000, h: 100, style: { bgColor: "FFE5E7EB" }, parent: "1" },      // divider
+    { id: "8", type: "layout-flow", x: 0, y: 92000, w: 50000, h: 8000, hidden: true, parent: "1" },                 // hidden container
+    { id: "9", type: "empty", x: 0, y: 92000, w: 50000, h: 8000, style: { bgColor: "FFFF0000" }, parent: "8" }       // inside it
+  ];
+  const bgBlocks = [
+    { zoneId: "3", top: 2, left: 0, bottom: 3, right: 1 },
+    { zoneId: "5", top: 6, left: 6, bottom: 20, right: 10, own: "white" },
+    { zoneId: "6", top: 6, left: 0, bottom: 8, right: 4 }
+  ];
+  const canvas = { top: 2, left: 0, bottom: 20, right: 11 };
+  const bgp = X.backgroundPlan(bgZones, "FFF5F5F5", bgBlocks, canvas, { w: 1200, h: 800 });
+  const bare = X.backgroundPlan(bgZones.filter(z => z.id !== "1"), "FFF5F5F5", bgBlocks, canvas, { w: 1200, h: 800 });
+  const shadeModel = X.parseTableauFormatting(`<?xml version='1.0' encoding='utf-8' ?><workbook><datasources/><worksheets>
+    <worksheet name='Plain'><table><view/><style/><panes><pane><mark class='Bar'/></pane></panes><rows/><cols/></table></worksheet>
+    <worksheet name='None'><table><view/><style><style-rule element='table'><format attr='background-color' value='#00000000'/></style-rule></style>
+      <panes><pane><mark class='Bar'/></pane></panes><rows/><cols/></table></worksheet>
+    <worksheet name='Green'><table><view/><style><style-rule element='table'><format attr='background-color' value='#e6f1e2'/></style-rule></style>
+      <panes><pane><mark class='Bar'/></pane></panes><rows/><cols/></table></worksheet>
+  </worksheets><dashboards><dashboard name='D'><style><style-rule element='table'><format attr='background-color' value='#f5f5f5'/></style-rule></style><zones/></dashboard></dashboards></workbook>`);
+  const shade = name => X.createSheetFormatter(shadeModel, name);
+  const backgrounds = [
+    check(bgp.colorAt(2, 0) === "FFFFFFFF" && bgp.colorAt(3, 9) === "FFFFFFFF", "a header bar colours the cells under the logo and spans the sheet"),
+    check(bgp.colorAt(7, 1) === "FFF9FAFB" && bgp.colorAt(12, 2) === "FFF9FAFB", "a see-through text box and the gaps show the container behind them"),
+    check(bgp.colorAt(10, 8) === null && bgp.colorAt(5, 7) === "FFF9FAFB", "a white sheet is left as it is on its white card"),
+    check(bare.colorAt(12, 2) === "FFF5F5F5" && ![...Array(21).keys()].some(r => bgp.colorAt(r, 0) === "FFFF0000"),
+      "the dashboard shading shows where no container is; zones in a hidden container stay hidden"),
+    check(bgp.lines.length === 1 && bgp.lines[0].dir === "h" && bgp.lines[0].at === 4 && bgp.lines[0].from === 0 && bgp.lines[0].to === 11 &&
+      bgp.lines[0].style === "thin" && bgp.lines[0].color === "FFE5E7EB", `a 1 px divider becomes a line across the sheet (got ${JSON.stringify(bgp.lines)})`),
+    check(shade("Plain").sheetShading() === undefined && shade("Plain").tableBackground() === null && shade("None").sheetShading() === "none" &&
+      shade("Green").tableBackground() === "FFE6F1E2" && X.tfDashboardShading(shadeModel, "D") === "FFF5F5F5",
+      "worksheet shading: its own colour, None or white – the dashboard's shading is the dashboard's own"),
+    check(!!trend && /<\/c:chart><c:spPr><a:noFill\/>/.test(partXml({ ...trend, background: null }, { widthPx: 338, heightPx: 250 })),
+      "a see-through worksheet draws its chart without a fill")
+  ];
+  print(`backgrounds: ${backgrounds.filter(Boolean).length}/${backgrounds.length} checks passed`);
+
+  // a waterfall built Tableau's way (Gantt bars on a running total, sized by -value, coloured by category)
+  // whose running sum and plain sum both arrive as "SUM(Value)", rows scrambled; and a stacked total bar
+  // whose colours are sorted by value
+  const wfModel = X.parseTableauFormatting(`<?xml version='1.0' encoding='utf-8' ?><workbook><datasources/><worksheets>
+    <worksheet name='Steps'><table><view><datasource-dependencies datasource='ds'>
+        <column-instance column='[Value]' derivation='Sum' name='[cum:sum:Value:qk:7]' pivot='key' type='quantitative'><table-calc aggregation='Sum' ordering-type='Rows' type='CumTotal'/></column-instance>
+        <column-instance column='[Cat]' derivation='None' name='[none:Cat:nk]' pivot='key' type='nominal'/>
+        <column-instance column='[M1]' derivation='Sum' name='[sum:M1:qk]' pivot='key' type='quantitative'/>
+        <column-instance column='[Value]' derivation='Sum' name='[sum:Value:qk]' pivot='key' type='quantitative'/>
+      </datasource-dependencies><computed-sort column='[ds].[none:Cat:nk]' direction='DESC' using='[ds].[sum:Value:qk]'/></view>
+      <style><style-rule element='cell'><format attr='text-format' field='[ds].[sum:Value:qk]' value='c&quot;$&quot;#,##0,,.0M;(&quot;$&quot;#,##0,,.0M)'/></style-rule>
+        <style-rule element='worksheet'><format attr='display-field-labels' scope='cols' value='false'/></style-rule></style>
+      <panes><pane><mark class='GanttBar'/><encodings><color column='[ds].[none:Cat:nk]'/><size column='[ds].[sum:M1:qk]'/><text column='[ds].[sum:Value:qk]'/></encodings>
+        <style><style-rule element='mark'><format attr='mark-labels-show' value='true'/></style-rule></style></pane></panes>
+      <rows>[ds].[cum:sum:Value:qk:7]</rows><cols>[ds].[none:Cat:nk]</cols></table></worksheet>
+    <worksheet name='Stack'><table><view><datasource-dependencies datasource='ds'>
+        <column-instance column='[Total]' derivation='None' name='[none:Total:nk]' pivot='key' type='nominal'/>
+        <column-instance column='[Cat]' derivation='None' name='[none:Cat:nk]' pivot='key' type='nominal'/>
+        <column-instance column='[Value]' derivation='Sum' name='[sum:Value:qk]' pivot='key' type='quantitative'/>
+      </datasource-dependencies><computed-sort column='[ds].[none:Cat:nk]' direction='ASC' using='[ds].[sum:Value:qk]'/></view><style/>
+      <panes><pane><mark class='Bar'/><encodings><color column='[ds].[none:Cat:nk]'/></encodings></pane></panes>
+      <rows>[ds].[sum:Value:qk]</rows><cols>[ds].[none:Total:nk]</cols></table></worksheet>
+  </worksheets><dashboards/></workbook>`);
+  const steps = [["A", 50e6], ["B", 30e6], ["C", 20e6]];
+  const runningOf = { A: 50e6, B: 80e6, C: 100e6 };
+  const wfSummary = { columns: [["Cat", "string"], ["SUM(M1)", "float"], ["SUM(Value)", "float"], ["SUM(Value)", "float"]].map(([fieldName, dataType], index) => ({ fieldName, dataType, index })),
+    data: [steps[2], steps[0], steps[1]].map(([c, v]) => [dv(c), dv(-v), dv(runningOf[c]), dv(v)]) };
+  const wfVisual = X.buildVisualModel(wfModel, "Steps", wfSummary, { dashboardName: "", displayName: "Steps" });
+  const [wf] = X.chooseVisualRenderer(wfVisual).renderer === "excel-chart" ? X.buildExcelChartSpecs(wfVisual, wfModel) : [];
+  const wfLabels = wf && wf.series.find(s => s.labelTexts);
+  const wfRefs = wf ? X.writeChartData(/** @type {any} */ ({ name: "Chart Data", getCell: () => ({}) }), wf, 0) : null;
+  const stVisual = X.buildVisualModel(wfModel, "Stack", { columns: [["Total", "string"], ["Cat", "string"], ["SUM(Value)", "float"]].map(([fieldName, dataType], index) => ({ fieldName, dataType, index })),
+    data: steps.map(([c, v]) => [dv("Total"), dv(c), dv(v)]) }, { dashboardName: "", displayName: "Stack" });
+  const [st] = X.buildExcelChartSpecs(stVisual, wfModel);
+  const waterfall = [
+    check(wfVisual.viewModel.cols[2].ref.inner === "cum:sum:Value:qk:7" && wfVisual.viewModel.cols[3].ref.inner === "sum:Value:qk",
+      `a running sum and its measure sharing a name are told apart (got ${wfVisual.viewModel.cols.map(c => c.ref && c.ref.inner).join(", ")})`),
+    check(!!wf && wf.categories.levels[0].join("") === "ABC" && JSON.stringify(wf.series[0].values) === "[0,50000000,80000000]" &&
+      wf.series[1].pointColors && new Set(wf.series[1].pointColors).size === 3 && wf.categoryTitle === "" && wf.gapWidth === 100,
+      `the waterfall: steps in the sheet's order, each in its category's colour, no field label (got ${wf && JSON.stringify({ c: wf.categories.levels[0], b: wf.series[0].values, t: wf.categoryTitle })})`),
+    check(!!wfLabels && wfLabels.type === "line" && JSON.stringify(wfLabels.values) === "[50000000,80000000,100000000]" &&
+      wfLabels.labelTexts.join(" ") === "$50.0M $30.0M $20.0M" && !!wfRefs && !!wfRefs.series[3].lbl,
+      `the step values written over the bars as Tableau formats them (got ${wfLabels && wfLabels.labelTexts})`),
+    check(!!st && st.series.map(s => s.name).join("") === "ABC", `a stack in the legend's order from the top: sorted by value, the smallest on top (got ${st && st.series.map(s => s.name)})`),
+    check(X.tfFormatNumber(77575909.43, '"$"#,##0.0,,"M";("$"#,##0.0,,"M")') === "$77.6M" && X.tfFormatNumber(-5e6, '"$"#,##0.0,,"M";("$"#,##0.0,,"M")') === "($5.0M)" &&
+      X.tfFormatNumber(0.1234, "0.0%") === "12.3%" && X.tfFormatNumber(1234567.89, "#,##0") === "1,234,568" && X.tfFormatNumber(-1234.5, "#,##0.00") === "-1,234.50" &&
+      X.tfFormatNumber(4, '0.0" DAYS"') === "4.0 DAYS" && X.tfFormatNumber(12.5, "General") === "12.5" && X.tfFormatNumber(0.5, "#.##") === ".5",
+      "numbers formatted as Excel shows them")
+  ];
+  print(`waterfall: ${waterfall.filter(Boolean).length}/${waterfall.length} checks passed`);
+
+  // button / icon sheets: a custom shape on empty shelves is drawn as its icon (the shape the workbook maps
+  // its current value to), never as a table of its True / False flags
+  const iconXml = `<?xml version='1.0' encoding='utf-8' ?><workbook><datasources><datasource name='ds'><style><style-rule element='mark'>
+      <encoding attr='shape' field='[none:Flag:nk]' type='shape'><map to='Icons/Exit.png'><bucket>false</bucket></map><map to='Icons/Expand.png'><bucket>true</bucket></map></encoding>
+    </style-rule></style><column caption='Flag' datatype='boolean' name='[Flag]' role='dimension' type='nominal'/></datasource></datasources><worksheets>
+    <worksheet name='Zoom'><table><view><datasource-dependencies datasource='ds'><column-instance column='[Flag]' derivation='None' name='[none:Flag:nk]' pivot='key' type='nominal'/></datasource-dependencies></view><style/>
+      <panes><pane><mark class='Shape'/><encodings><shape column='[ds].[none:Flag:nk]'/></encodings>
+        <style><style-rule element='mark'><format attr='shape' value='Icons/Default.png'/></style-rule></style></pane></panes><rows/><cols/></table></worksheet>
+    <worksheet name='Dot'><table><view/><style/><panes><pane><mark class='Shape'/><style><style-rule element='mark'><format attr='shape' value=':filled/circle'/></style-rule></style></pane></panes><rows/><cols/></table></worksheet>
+    <worksheet name='Labelled'><table><view/><style/><panes><pane><mark class='Shape'/><encodings><text column='[ds].[none:Flag:nk]'/></encodings></pane></panes><rows/><cols/></table></worksheet>
+  </worksheets><dashboards/><external><shapes><shape name='Icons/Expand.png'>
+    ${Buffer.from(png).toString("base64").replace(/(.{20})/g, "$1\n    ")}
+  </shape></shapes></external></workbook>`;
+  const iconModel = X.parseTableauFormatting(iconXml);
+  const flag = v => ({ columns: [{ fieldName: "Flag", dataType: "bool", index: 0 }], data: [[{ value: v, nativeValue: v, formattedValue: v ? "True" : "False" }]] });
+  const embedded = X.extractCustomShapes(iconXml)["shape:Icons/Expand.png"];
+  const icons = [
+    check(X.tvIconSheet(iconModel, "Zoom", flag(true)).shape === "Icons/Expand.png" && X.tvIconSheet(iconModel, "Zoom", flag(false)).shape === "Icons/Exit.png",
+      "an icon sheet shows the shape its value maps to"),
+    check(X.tvIconSheet(iconModel, "Zoom", { columns: [], data: [] }).shape === "Icons/Default.png", "without the value, the Marks card shape"),
+    check(X.tvIconSheet(iconModel, "Dot", flag(true)).shape === null && X.tvIconSheet(iconModel, "Labelled", flag(true)) === null,
+      "Tableau's own shapes are left out; a shape with text is not an icon"),
+    check(!!embedded && Buffer.from(embedded.data).equals(Buffer.from(png)) && X.imageInfo(embedded.data).type === "png",
+      "custom shapes embedded in the workbook are read back byte for byte")
+  ];
+  print(`icons: ${icons.filter(Boolean).length}/${icons.length} checks passed`);
   if (failures.length) {
     console.error(`\n${failures.length} check(s) failed:\n  ` + failures.join("\n  "));
     process.exitCode = 1;

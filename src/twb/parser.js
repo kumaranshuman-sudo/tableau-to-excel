@@ -102,7 +102,19 @@ export function tfParseStyle(styleEl) {
     majorSpacing: tfNum(e.getAttribute("major-spacing")),
     domainExpand: e.getAttribute("domain-expand") || undefined
   }));
-  return spaces.length ? { rules, encodings, spaces } : { rules, encodings };
+  // Shape encodings: value → shape ("Zoom Icons/Zoom in.png" = a custom shape, ":filled/circle" = Tableau's)
+  const shapes = Array.from(styleEl.getElementsByTagName("encoding")).filter(e => e.getAttribute("attr") === "shape").map(e => {
+    /** @type {Record<string, string>} */
+    const map = {};
+    Array.from(e.getElementsByTagName("map")).forEach(m => Array.from(m.getElementsByTagName("bucket"))
+      .forEach(b => { map[tfBucketKey(b.textContent)] = m.getAttribute("to"); }));
+    return { field: tfParseFieldRef(e.getAttribute("field")), map };
+  }).filter(s => s.field);
+  /** @type {ParsedStyle} */
+  const out = { rules, encodings };
+  if (spaces.length) out.spaces = spaces;
+  if (shapes.length) out.shapes = shapes;
+  return out;
 }
 
 export function tfParseTitle(ownerEl) {

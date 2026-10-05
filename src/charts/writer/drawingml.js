@@ -199,7 +199,7 @@ export function valueRange(spec, axisPlot) {
   return { fixed: range, unit: settle(range, unit) };
 }
 
-/** scatter / bubble: data labels taken from cells (Label = a dimension)
+/** data labels taken from cells (scatter / bubble: Label = a dimension; waterfall steps over their bars)
  * @param {ChartSeries} s @param {ChartRefs["series"][number]} r */
 export function labelRangeXml(s, r) {
   if (!s.labelTexts || !r.lbl) return "";
@@ -220,7 +220,7 @@ export function seriesXml(spec, s, k, refs, type, hiddenLabels) {
       `<c:spPr>${solid(c)}<a:ln><a:noFill/></a:ln></c:spPr></c:dPt>` : "").join("");
     const pos = spec.labelPos || (spec.stacked ? null : "outEnd");
     return `<c:ser>${head}<c:spPr>${solid(s.color)}<a:ln><a:noFill/></a:ln></c:spPr><c:invertIfNegative val="0"/>` +
-      `${dpts}${dLbls(spec, s, pos)}${catXml(refs.cat, levels)}${valXml("val", r.val, s.values)}</c:ser>`;
+      `${dpts}${dLbls(spec, s, pos)}${catXml(refs.cat, levels)}${valXml("val", r.val, s.values)}${labelRangeXml(s, r)}</c:ser>`;
   }
   if (type === "line" && s.refLine) {         // reference line: flat, no markers; label above the 2nd point, as Tableau's
     const at = Math.min(1, Math.max(0, (s.values || []).length - 1));
@@ -234,7 +234,7 @@ export function seriesXml(spec, s, k, refs, type, hiddenLabels) {
     const size = s.markerSize || 7;
     const dpts = s.marker ? pc.map((c, i) => c ? `<c:dPt><c:idx val="${i}"/>${markerXml(symbol, c, size)}<c:bubble3D val="0"/></c:dPt>` : "").join("") : "";
     return `<c:ser>${head}<c:spPr>${lineSp}</c:spPr>${markerXml(symbol, s.color, size)}${dpts}` +
-      `${dLbls(spec, s, "t")}${catXml(refs.cat, levels)}${valXml("val", r.val, s.values)}<c:smooth val="0"/></c:ser>`;
+      `${dLbls(spec, s, "t", hiddenLabels)}${catXml(refs.cat, levels)}${valXml("val", r.val, s.values)}<c:smooth val="0"/>${labelRangeXml(s, r)}</c:ser>`;
   }
   if (type === "area") {
     return `<c:ser>${head}<c:spPr>${solid(s.color, spec.stacked ? null : 75000)}<a:ln><a:noFill/></a:ln></c:spPr>` +
@@ -392,6 +392,27 @@ export function plotAreaXml(spec, refs, plot = null, axisPlot = null) {
         numFmt: spec.numFmt, tickFmt: spec.valueAxisNumFmt, midCat: true, lowLabels: true, values: spec.series.flatMap(s => s.y),
         fixed: fit.y || { min: spec.valueMin, max: spec.valueMax }, deleted: spec.axesHidden || spec.valueAxisHidden, majorUnit: spec.valueMajorUnit });
   }
+  // labels written over the bars (waterfall steps): as Tableau, a label that would overlap one already
+  // placed is left out – positions estimated from the plot size and the axis range
+  const { fixed, unit } = valueRange(spec, axisPlot);
+  /** @type {Map<number, number[]>} */
+  const culled = new Map();
+  if (axisPlot && spec.labelCull !== false && fixed.min !== undefined && fixed.max !== undefined && fixed.max > fixed.min) {
+    const size = (spec.labelFont && spec.labelFont.size) || spec.font.size || 9, h = size * 4 / 3 + 2;
+    spec.series.forEach((s, i) => {
+      if (!s.labelTexts || (s.type || k) !== "line") return;
+      const slot = axisPlot.w / Math.max(1, s.values.length), kept = [], hide = [];
+      s.values.forEach((v, j) => {
+        const t = s.labelTexts[j], n = num(v);
+        if (n === null || !t) return;
+        const w = String(t).length * size * 0.62 + 4, x = (j + 0.5) * slot;
+        const y = axisPlot.h * (fixed.max - n) / (fixed.max - fixed.min) - h / 2 - 3;   // a label just above the point
+        const box = { l: x - w / 2, r: x + w / 2, t: y - h / 2, b: y + h / 2 };
+        if (kept.some(q => q.l < box.r && box.l < q.r && q.t < box.b && box.t < q.b)) hide.push(j); else kept.push(box);
+      });
+      if (hide.length) culled.set(i, hide);
+    });
+  }
   // bar / line / area / combo: one chart group per (type, axis)
   const groups = [];
   spec.series.forEach((s, i) => {
@@ -399,7 +420,7 @@ export function plotAreaXml(spec, refs, plot = null, axisPlot = null) {
     const key = type + (s.secondary ? "2" : "1");
     let g = groups.find(x => x.key === key);
     if (!g) groups.push(g = { key, type, secondary: !!s.secondary, items: [] });
-    g.items.push(seriesXml(spec, s, i, refs, type));
+    g.items.push(seriesXml(spec, s, i, refs, type, culled.get(i)));
   });
   const hasSecondary = groups.some(g => g.secondary);
   const xml = groups.map(g => {
@@ -423,7 +444,6 @@ export function plotAreaXml(spec, refs, plot = null, axisPlot = null) {
     return `<c:lineChart><c:grouping val="standard"/><c:varyColors val="0"/>${sers}${box}<c:marker val="1"/>${ax}</c:lineChart>`;
   }).join("");
   const axisValues = secondary => spec.series.filter(s => !!s.secondary === secondary).flatMap(s => s.values);
-  const { fixed, unit } = valueRange(spec, axisPlot);
   // reference lines across horizontal bars: XY lines on hidden x2 / y2 axes, x2 pinned to the bars' value range
   let overlay = "", overlayAxes = "";
   if (spec.barDir === "bar" && spec.refLines && spec.refLines.length && fixed.min !== undefined && fixed.max !== undefined) {
@@ -465,7 +485,7 @@ export function chartXml(spec, refs, size) {
     `<c:chart><c:autoTitleDeleted val="1"/><c:plotArea>${layout}${plotAreaXml(spec, refs, plot, axisPlot)}` +
     `<c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr></c:plotArea>${legend}` +
     `<c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/></c:chart>` +
-    `<c:spPr>${solid(spec.background || "FFFFFF")}<a:ln><a:noFill/></a:ln></c:spPr>${txPr(spec.font)}` +
+    `<c:spPr>${spec.background === null ? "<a:noFill/>" : solid(spec.background || "FFFFFF")}<a:ln><a:noFill/></a:ln></c:spPr>${txPr(spec.font)}` +
     `<c:printSettings><c:headerFooter/><c:pageMargins b="0.75" l="0.7" r="0.7" t="0.75" header="0.3" footer="0.3"/>` +
     `<c:pageSetup/></c:printSettings></c:chartSpace>`;
 }

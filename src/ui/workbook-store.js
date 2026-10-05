@@ -3,6 +3,7 @@ import JSZip from "jszip";
 import { parseTableauFormatting } from "../twb/parser.js";
 import { showWorkbookLabel } from "./status.js";
 import { checkWorkbookMatch } from "../visual/workbook-match.js";
+import { extractCustomShapes } from "../export/images.js";
 
 /* =============================================================================
  * parseTwbXmlInBrowser(xmlString) - Parses TITLES from XML
@@ -276,8 +277,8 @@ export async function readWorkbookFile(file) {
     FORMAT_MODEL_CACHE = formatModel;
     FORMAT_MODEL_FILE = file.name;
     await storeFormatModel(file.name, formatModel, titleMap);
-    // logos / icons: only a .twbx carries the image files
-    const images = zip ? await extractWorkbookImages(zip, formatModel) : {};
+    // logos: only a .twbx carries the image files; custom shapes (button icons) are inside the workbook XML
+    const images = { ...(zip ? await extractWorkbookImages(zip, formatModel) : {}), ...extractCustomShapes(xmlString) };
     IMAGE_CACHE = { file: file.name, images };
     if (Object.keys(images).length) await storeWorkbookImages(file.name, images);
     tableau.extensions.settings.set("twbTitleMap", JSON.stringify(titleMap));
