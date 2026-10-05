@@ -5,13 +5,13 @@ import { classifyImageObjects } from "./images.js";
 /* ── Layout constants ─────────────────────────────────────────────────── */
 export const PX_PER_COL  = 90;
 
-export const PX_PER_ROW  = 22;
+export const PX_PER_ROW  = 20;          // one Excel row (15 pt): dashboard y maps 1:1 onto the sheet
 
 export const TITLE_ROWS  = 1;
 
 export const COL_GAP     = 0;
 
-export const ROW_GAP     = 1;
+export const ROW_GAP     = 0;            // Tableau zones touch; their padding is inside the zone
 
 export const ROW_GROUP_THRESHOLD = 8;
 
@@ -25,14 +25,78 @@ export const CHART_DATA_SHEET = "Chart Data";
 
 /* pixel box of a chart/image visual: the dashboard zone size minus Tableau's title strip */
 export function graphicBox(layout, vm) {
-  const widthPx = Math.max(160, Math.round((layout && layout.widthPx) || 480));
+  const widthPx = Math.max(40, Math.round((layout && layout.widthPx) || 480));
   const zoneH = Math.round((layout && layout.heightPx) || 320);
   const titleRows = vm.showTitle ? 1 : 0;
-  const heightPx = Math.max(120, zoneH - (titleRows ? 28 : 0));
+  const heightPx = Math.max(60, zoneH - (titleRows ? 28 : 0));
   return { widthPx, heightPx, titleRows,
            // the zone's width on the dashboard grid, so the block lines up with the blocks above / below it
            gridW: layout && layout.widthPx ? layout.gridW : Math.max(2, Math.ceil(widthPx / EXCEL_COL_PX)),
-           rows: titleRows + Math.ceil(heightPx / EXCEL_ROW_PX) };
+           // the zone's own height on the sheet, so the block below starts where it does on the dashboard
+           rows: Math.max(titleRows + 1, Math.round(zoneH / EXCEL_ROW_PX)) };
+}
+
+/* zone edges closer than this (px) are one column boundary */
+export const EDGE_MERGE_PX = 6;
+
+/**
+ * Excel columns from the dashboard's own zone edges: every left / right edge of a laid-out block is a column
+ * boundary, so each column is as wide (px) as the gap between two edges and every block spans exactly its
+ * zone – positions and widths as on the dashboard, whatever the content. A table zone gets one column per
+ * field: at the widths the table draws (splitPx, from the zone's left edge; scaled down only when they would
+ * run past the zone), else split by relative widths.
+ * @param {{ layout?: any, split?: number[], splitPx?: number[] }[]} items
+ * @returns {{ colPx: number[], span: (item: any) => { gridCol: number, gridW: number } | null }}
+ */
+export function buildColumnGrid(items) {
+  const laid = items.filter(it => it.layout && typeof it.layout.xPx === "number" && it.layout.widthPx > 0);
+  if (!laid.length) return { colPx: [], span: () => null };
+  const minX = Math.min(...laid.map(it => it.layout.xPx));
+  const merge = (list, tol = EDGE_MERGE_PX) => {
+    const out = [];
+    [...list].sort((a, b) => a - b).forEach(e => { if (!out.length || e - out[out.length - 1] > tol) out.push(e); });
+    return out;
+  };
+  const sideOf = it => [it.layout.xPx - minX, it.layout.xPx - minX + it.layout.widthPx];
+  let edges = merge(laid.flatMap(sideOf));
+  const nearest = v => edges.reduce((best, e, i) => Math.abs(e - v) < Math.abs(edges[best] - v) ? i : best, 0);
+  const extra = [];
+  /** @type {[number, number[]][]} a table's span and its own column edges */
+  const tables = [];
+  laid.forEach(it => {
+    if (it.splitPx && it.splitPx.length) {
+      const [l, r] = sideOf(it), L = edges[nearest(l)], R = edges[nearest(r)];
+      const total = it.splitPx.reduce((a, b) => a + b, 0);
+      const k = total > R - L ? (R - L) / total : 1;
+      let at = L;
+      const own = [L];
+      it.splitPx.forEach(w => { at += w * k; own.push(Math.round(at)); });
+      extra.push(...own);
+      tables.push([L, own]);
+      return;
+    }
+    if (!it.split || it.split.length < 2) return;
+    const [l, r] = sideOf(it), L = edges[nearest(l)], R = edges[nearest(r)];
+    if (edges.filter(e => e > L && e < R).length + 1 >= it.split.length) return;
+    const total = it.split.reduce((a, b) => a + b, 0);
+    let at = L;
+    it.split.slice(0, -1).forEach(w => { at += (R - L) * w / total; extra.push(Math.round(at)); });
+  });
+  edges = merge([...edges, ...extra], 2);
+  // inside a table only its own column edges: another block's edge there would cut a field's column in two
+  tables.forEach(([L, own]) => {
+    const end = own[own.length - 1];
+    edges = edges.filter(e => e <= L || e >= end || own.some(o => Math.abs(o - e) <= 2));
+  });
+  const colPx = edges.slice(1).map((e, i) => e - edges[i]);
+  return {
+    colPx,
+    span: it => {
+      if (!laid.includes(it)) return null;
+      const [l, r] = sideOf(it), a = nearest(l), b = nearest(r);
+      return { gridCol: a, gridW: Math.max(1, b - a) };
+    }
+  };
 }
 
 export function getExcelColumnName(colIndex) {
@@ -169,9 +233,20 @@ export function isGroupedTable(item) {
             item.vm.rows.length > ROW_GROUP_THRESHOLD);
 }
 
+/**
+ * Sheet rows a table's header takes: the height Tableau stores for it in 20 px rows (merged down), so a tall
+ * header keeps the sheet's rows at 20 px – a single tall row would push the blocks beside the table down.
+ * @param {ViewModel} vm
+ */
+export function headerRowSpan(vm) {
+  if (!vm.showHeaderRow) return 0;
+  const hpx = vm.fmt && vm.fmt.headerRowHeightPx ? vm.fmt.headerRowHeightPx() : 0;
+  return hpx ? Math.max(1, Math.round(hpx / PX_PER_ROW)) : 1;
+}
+
 /* sheet row of a table's first data row */
 export function tableDataStart(item) {
-  return item.gridRow + (item.vm.showTitle ? 1 : 0) + (item.vm.showHeaderRow ? 1 : 0);
+  return item.gridRow + (item.vm.showTitle ? 1 : 0) + headerRowSpan(item.vm);
 }
 
 /** sets item.visibleRows on every table that will be grouped @param {ExportItem[]} items */
@@ -193,7 +268,7 @@ export function setTableVisibleRows(items) {
 /* rows the writer will produce – used for layout before writing */
 export function viewModelHeight(vm) {
   const grouped = FORMAT_CONFIG.groupOverflowRows && vm.rows.length > ROW_GROUP_THRESHOLD;
-  return (vm.showTitle ? 1 : 0) + (vm.showHeaderRow ? 1 : 0) + vm.rows.length + (grouped ? 1 : 0);
+  return (vm.showTitle ? 1 : 0) + headerRowSpan(vm) + vm.rows.length + (grouped ? 1 : 0);
 }
 
 export function resolveCollisions(zones) {

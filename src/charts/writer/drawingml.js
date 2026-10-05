@@ -74,8 +74,9 @@ export function dLbls(spec, s, pos, hidden) {
   if (!s.labels) return "";
   const drop = (hidden || []).map(i => `<c:dLbl><c:idx val="${i}"/><c:delete val="1"/></c:dLbl>`).join("");
   if (s.labelTexts) {
+    // a doughnut takes no label position (Excel refuses the file)
     return `<c:dLbls>${drop}<c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr>${labelTxPr(spec)}` +
-      `<c:dLblPos val="${pos || "r"}"/><c:showLegendKey val="0"/><c:showVal val="0"/><c:showCatName val="0"/>` +
+      `${spec.kind === "doughnut" ? "" : `<c:dLblPos val="${pos || "r"}"/>`}<c:showLegendKey val="0"/><c:showVal val="0"/><c:showCatName val="0"/>` +
       `<c:showSerName val="0"/><c:showPercent val="0"/><c:showBubbleSize val="0"/>` +
       `<c:extLst><c:ext uri="{CE6537A1-D6FC-4f65-9D91-7224C49458BB}" xmlns:c15="${C15}">` +
       `<c15:showDataLabelsRange val="1"/></c:ext></c:extLst></c:dLbls>`;
@@ -215,11 +216,13 @@ export function seriesXml(spec, s, k, refs, type, hiddenLabels) {
   const head = `<c:idx val="${k}"/><c:order val="${k}"/>${serTx(r.tx, s.name)}`;
   const pc = s.pointColors || [];
   const levels = spec.categories ? spec.categories.levels : [];
+  // the workbook's opacity (Color → Opacity), in DrawingML's 1/1000 %
+  const opacity = s.alpha !== undefined && s.alpha < 1 ? Math.round(Math.max(0, s.alpha) * 100000) : null;
   if (type === "bar") {
     const dpts = pc.map((c, i) => c ? `<c:dPt><c:idx val="${i}"/><c:invertIfNegative val="0"/><c:bubble3D val="0"/>` +
-      `<c:spPr>${solid(c)}<a:ln><a:noFill/></a:ln></c:spPr></c:dPt>` : "").join("");
+      `<c:spPr>${solid(c, opacity)}<a:ln><a:noFill/></a:ln></c:spPr></c:dPt>` : "").join("");
     const pos = spec.labelPos || (spec.stacked ? null : "outEnd");
-    return `<c:ser>${head}<c:spPr>${solid(s.color)}<a:ln><a:noFill/></a:ln></c:spPr><c:invertIfNegative val="0"/>` +
+    return `<c:ser>${head}<c:spPr>${solid(s.color, opacity)}<a:ln><a:noFill/></a:ln></c:spPr><c:invertIfNegative val="0"/>` +
       `${dpts}${dLbls(spec, s, pos)}${catXml(refs.cat, levels)}${valXml("val", r.val, s.values)}${labelRangeXml(s, r)}</c:ser>`;
   }
   if (type === "line" && s.refLine) {         // reference line: flat, no markers; label above the 2nd point, as Tableau's
@@ -229,7 +232,7 @@ export function seriesXml(spec, s, k, refs, type, hiddenLabels) {
   }
   if (type === "line") {
     const lineSp = s.line === false ? `<a:ln w="28575"><a:noFill/></a:ln>`
-      : `<a:ln w="22225" cap="rnd">${solid(s.color)}<a:round/></a:ln>`;
+      : `<a:ln w="22225" cap="rnd">${solid(s.color, opacity)}<a:round/></a:ln>`;
     const symbol = s.marker ? (s.markerSymbol || "circle") : "none";
     const size = s.markerSize || 7;
     const dpts = s.marker ? pc.map((c, i) => c ? `<c:dPt><c:idx val="${i}"/>${markerXml(symbol, c, size)}<c:bubble3D val="0"/></c:dPt>` : "").join("") : "";
@@ -237,14 +240,14 @@ export function seriesXml(spec, s, k, refs, type, hiddenLabels) {
       `${dLbls(spec, s, "t", hiddenLabels)}${catXml(refs.cat, levels)}${valXml("val", r.val, s.values)}<c:smooth val="0"/>${labelRangeXml(s, r)}</c:ser>`;
   }
   if (type === "area") {
-    return `<c:ser>${head}<c:spPr>${solid(s.color, spec.stacked ? null : 75000)}<a:ln><a:noFill/></a:ln></c:spPr>` +
+    return `<c:ser>${head}<c:spPr>${solid(s.color, opacity !== null || s.alpha !== undefined ? opacity : spec.stacked ? null : 75000)}<a:ln><a:noFill/></a:ln></c:spPr>` +
       `${dLbls(spec, s, null)}${catXml(refs.cat, levels)}${valXml("val", r.val, s.values)}</c:ser>`;
   }
   if (type === "pie") {
     const dpts = pc.map((c, i) => `<c:dPt><c:idx val="${i}"/><c:bubble3D val="0"/>` +
       `<c:spPr>${solid(c || s.color)}${line("FFFFFF", 12700)}</c:spPr></c:dPt>`).join("");
     return `<c:ser>${head}${dpts}${dLbls(spec, s, spec.kind === "pie" ? "bestFit" : null)}` +
-      `${catXml(refs.cat, levels)}${valXml("val", r.val, s.values)}</c:ser>`;
+      `${catXml(refs.cat, levels)}${valXml("val", r.val, s.values)}${labelRangeXml(s, r)}</c:ser>`;
   }
   if (type === "bubble") {
     // packed bubbles: opaque with a white outline like Tableau; map marks slightly see-through
@@ -368,7 +371,7 @@ export function plotAreaXml(spec, refs, plot = null, axisPlot = null) {
     const ser = seriesXml(spec, spec.series[0], 0, refs, "pie");
     return k === "pie"
       ? `<c:pieChart><c:varyColors val="1"/>${ser}<c:firstSliceAng val="0"/></c:pieChart>`
-      : `<c:doughnutChart><c:varyColors val="1"/>${ser}<c:firstSliceAng val="0"/><c:holeSize val="55"/></c:doughnutChart>`;
+      : `<c:doughnutChart><c:varyColors val="1"/>${ser}<c:firstSliceAng val="0"/><c:holeSize val="${spec.holeSize || 55}"/></c:doughnutChart>`;
   }
   if (k === "scatter" || k === "bubble") {
     const fit = xyFit(spec, plot);
@@ -479,10 +482,29 @@ export function chartXml(spec, refs, size) {
     : "<c:layout/>";
   const legend = spec.legend
     ? `<c:legend><c:legendPos val="r"/><c:overlay val="0"/>${txPr(spec.font)}</c:legend>` : "";
+  // a donut's centre text: the chart title laid over the hole, the ring centred in a fixed plot area
+  const center = spec.kind === "doughnut" && spec.centerLabel && spec.centerLabel.length ? spec.centerLabel : null;
+  let titleXml = "", plotLayout = layout;
+  if (center) {
+    const W = (size && size.widthPx) || 400, H = (size && size.heightPx) || 300;
+    const box = { x: 0.04, y: 0.04, w: spec.legend ? 0.66 : 0.92, h: 0.92 };
+    const pt = s => s.size || spec.font.size || 9;
+    const tw = Math.max(...center.map(l => l.reduce((w, s) => w + String(s.text).length * pt(s) * 0.62, 0))) + 10;
+    const th = center.reduce((h, l) => h + Math.max(...l.map(pt)) * 4 / 3 * 1.25, 0) + 6;
+    const cx = box.x + box.w / 2, cy = box.y + box.h / 2;
+    titleXml = `<c:title><c:tx><c:rich><a:bodyPr wrap="none"/><a:lstStyle/>` + center.map(l => `<a:p><a:pPr algn="ctr"><a:defRPr/></a:pPr>` +
+        l.map(s => `<a:r>${runProps({ name: s.font || spec.font.name, size: pt(s), color: s.color || spec.font.color }, { bold: s.bold }, "rPr")}` +
+          `<a:t>${esc(s.text)}</a:t></a:r>`).join("") + `</a:p>`).join("") + `</c:rich></c:tx>` +
+      `<c:layout><c:manualLayout><c:xMode val="edge"/><c:yMode val="edge"/>` +
+      `<c:x val="${Math.max(0, cx - tw / 2 / W).toFixed(4)}"/><c:y val="${Math.max(0, cy - th / 2 / H).toFixed(4)}"/></c:manualLayout></c:layout>` +
+      `<c:overlay val="1"/><c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr></c:title>`;
+    plotLayout = `<c:layout><c:manualLayout><c:layoutTarget val="inner"/><c:xMode val="edge"/><c:yMode val="edge"/>` +
+      `<c:x val="${box.x}"/><c:y val="${box.y}"/><c:w val="${box.w}"/><c:h val="${box.h}"/></c:manualLayout></c:layout>`;
+  }
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n` +
     `<c:chartSpace xmlns:c="${NS.c}" xmlns:a="${NS.a}" xmlns:r="${NS.r}">` +
     `<c:date1904 val="0"/><c:lang val="en-US"/><c:roundedCorners val="0"/>` +
-    `<c:chart><c:autoTitleDeleted val="1"/><c:plotArea>${layout}${plotAreaXml(spec, refs, plot, axisPlot)}` +
+    `<c:chart>${titleXml}<c:autoTitleDeleted val="${titleXml ? 0 : 1}"/><c:plotArea>${plotLayout}${plotAreaXml(spec, refs, plot, axisPlot)}` +
     `<c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr></c:plotArea>${legend}` +
     `<c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/></c:chart>` +
     `<c:spPr>${spec.background === null ? "<a:noFill/>" : solid(spec.background || "FFFFFF")}<a:ln><a:noFill/></a:ln></c:spPr>${txPr(spec.font)}` +

@@ -162,6 +162,38 @@ export function tvLabelFormatter(vm, ci) {
   return (text, dv) => tfFormatDateLabel(raw, text, dv) ?? text;
 }
 
+/**
+ * A marks card's label as lines of text segments: its custom label (Label → Text), else one line per Text
+ * field; each field token replaced by valueOf(ref). A token split over runs still resolves, each segment
+ * keeps the font of the run it starts in.
+ * @param {any} pane @param {(ref: FieldRef) => string} valueOf
+ * @returns {{ text: string, props: Record<string, any> }[][]}
+ */
+export function tvPaneLabel(pane, valueOf) {
+  const runs = pane.labelRuns.length ? pane.labelRuns.map(r => ({ text: String(r.text), props: r.props || {} }))
+    : pane.encodings.filter(e => e.channel === "text" || e.channel === "label")
+        .flatMap((e, i) => [...(i ? [{ text: "\n", props: {} }] : []), { text: `<${e.field.raw}>`, props: {} }]);
+  const chars = runs.flatMap(r => [...r.text].map(ch => ({ ch, props: r.props })));
+  const text = chars.map(c => c.ch).join("");
+  /** @type {{ text: string, props: Record<string, any> }[][]} */
+  const lines = [[]];
+  const push = (t, props) => {
+    if (!t) return;
+    const line = lines[lines.length - 1], last = line[line.length - 1];
+    if (last && last.props === props) last.text += t; else line.push({ text: t, props });
+  };
+  const re = /<([^<>]+)>|Æ[ \t]*(?:\r?\n)?|\r?\n/g;
+  let at = 0;
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    for (let k = at; k < m.index; k++) push(chars[k].ch, chars[k].props);
+    if (m[1] !== undefined) { const ref = tfParseFieldRef(m[1]); push(ref ? valueOf(ref) : m[0], chars[m.index].props); }
+    else lines.push([]);
+    at = m.index + m[0].length;
+  }
+  for (let k = at; k < text.length; k++) push(chars[k].ch, chars[k].props);
+  return lines;
+}
+
 /* ── category axis: distinct label tuples in view order ─────────────────── */
 /**
  * @param {ViewModel} vm

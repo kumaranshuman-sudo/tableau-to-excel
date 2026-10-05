@@ -3,9 +3,9 @@ import ExcelJS from "exceljs";
 import { buildExcelChartSpecs } from "../charts/model/index.js";
 import { FORMAT_CONFIG, TABLEAU_DEFAULTS, TF_ELEMENTS, VISUAL_TYPES } from "../config.js";
 import { writeDashboardTitle, writeIndividualFilterTable } from "./cell-writers.js";
-import { CHART_DATA_SHEET, EXCEL_ROW_PX, OBJECT_KIND, PX_PER_COL, PX_PER_ROW, ROW_GAP, buildLayoutMap, getExcelColumnName, graphicBox, makeRangeTracker, resolveCollisions, setTableVisibleRows, tableDataStart, viewModelHeight } from "./layout.js";
+import { CHART_DATA_SHEET, EXCEL_ROW_PX, OBJECT_KIND, PX_PER_COL, PX_PER_ROW, ROW_GAP, buildColumnGrid, buildLayoutMap, getExcelColumnName, graphicBox, makeRangeTracker, resolveCollisions, setTableVisibleRows, tableDataStart, viewModelHeight } from "./layout.js";
 import { extractFilterValuesPerField, fetchAllSheetsData, isFilterValueWorksheet } from "./sheet-data.js";
-import { applyAutoFilters, setColumnWidths, writeKPICardStacked, writeRegularTable, writeTableauTitle } from "./visual-writers.js";
+import { applyAutoFilters, setColumnWidths, tableColumnPx, writeKPICardStacked, writeRegularTable, writeTableauTitle } from "./visual-writers.js";
 import { KPI_GUTTER, buildKpiCard, buildTextCard, writeKpiCard } from "./kpi-card.js";
 import { tfStrokeToBorder, tfZoneText } from "../twb/dashboard-text.js";
 import { tfExcelFill } from "../format/excel-style.js";
@@ -139,7 +139,7 @@ export async function exportToExcel() {
           filterName: matchedFilterName,
           values: matchedValues,
           layout: layout,
-          rowCount: 2 + (Array.isArray(matchedValues) ? matchedValues.length : 1),
+          rowCount: 1 + (Array.isArray(matchedValues) ? matchedValues.length : 1),
           originalData: summaryData
         });
       } else {
@@ -252,7 +252,7 @@ export async function exportToExcel() {
         const value = String(raw).replace(/\s+12:00:00\s*AM$|\s+00:00:00$/i, "");   // dates: no midnight time
         filterValueItems.push({
           type: "filterValue", isParameter: true, name: param.name, visualName: param.name,
-          filterName: param.name, values: [value], layout: layoutMap.get(control.name), rowCount: 3
+          filterName: param.name, values: [value], layout: layoutMap.get(control.name), rowCount: 2
         });
       });
       if (params.length) console.log(`[Parameters] ${used.size} of ${params.length} parameters have a control on the dashboard`);
@@ -339,7 +339,20 @@ export async function exportToExcel() {
     console.table(visualStatuses);
     updateVisualStatus(visualStatuses, workbookWarning);
 
+    // columns from the dashboard's zone edges: every block keeps its Tableau position and width; a table gets
+    // a column per field inside its zone, split by how much its fields hold
+    allItems.forEach(item => {
+      if (item.vm && item.type === "worksheet" && !item.box && !item.kpiCard && !item.isKPI) {
+        item.splitPx = tableColumnPx(item.vm);                 // the widths Tableau draws the table at
+      } else if (item.isKPI && !item.kpiCard) item.split = [1, 1];
+      else if (item.kpiCard && item.kpiCard.tiles.length > 1) item.split = item.kpiCard.tiles.map(() => 1);
+    });
+    const grid = buildColumnGrid(allItems);
     const placedItems = allItems.map((item, idx) => {
+      const span = grid.span(item);
+      if (item.layout && span) {
+        return { ...item, gridRow: item.layout.gridRow, gridCol: span.gridCol, gridW: span.gridW, allocatedRows: item.rowCount };
+      }
       if (item.layout) {
         const l = item.layout;
         let calculatedWidth = l.gridW;
@@ -485,7 +498,8 @@ setTableVisibleRows(placedItems);
           chartJobs.push({
             spec, refs, item, name: item.visualName || item.name,
             col: item.gridCol, row: item.gridRow + titleRows + Math.floor(offPx / EXCEL_ROW_PX),
-            rowOffPx: offPx % EXCEL_ROW_PX, widthPx: item.box.widthPx, heightPx: paneH
+            rowOffPx: offPx % EXCEL_ROW_PX, widthPx: item.box.widthPx, heightPx: paneH,
+            top: item.gridRow + titleRows, pane: k, panes: specs.length
           });
         });
         reserveGraphicBlock(item);
@@ -538,9 +552,9 @@ setTableVisibleRows(placedItems);
           item.gridRow,
           item.gridCol,
           tracker,
-          item.isParameter ? "PARAMETER VALUE" : undefined
+          item.gridW
         );
-        colWidths[item.gridCol] = Math.max(colWidths[item.gridCol] || 0, 35);
+        if (!item.layout) colWidths[item.gridCol] = Math.max(colWidths[item.gridCol] || 0, 35);
       } else if (item.image) {
         tracker.update(item.gridRow, item.gridCol);                 // the picture goes in once the columns are sized
         tracker.update(item.gridRow + item.allocatedRows - 1, item.gridCol + item.gridW - 1);
@@ -651,6 +665,8 @@ setTableVisibleRows(placedItems);
       });
     }
 
+    // the grid's columns at their dashboard widths (Excel: px = 7 × stored width); content no longer widens them
+    grid.colPx.forEach((px, c) => { exactWidths[c] = Math.max(0.1, Math.round(px / 7 * 100) / 100); });
     setColumnWidths(worksheet, colWidths, exactWidths);
     applyAutoFilters(worksheet, allTablesInfo);
     if (FORMAT_CONFIG.printFitToWidth) {
@@ -662,8 +678,55 @@ setTableVisibleRows(placedItems);
         printArea: `A$1:${getExcelColumnName(used.e.c)}$${used.e.r + 1}` };          // ExcelJS adds the column's $
     }
 
+    // every row a definite 15 pt (20 px): without one, Excel derives the row height from the display's scaling
+    // (e.g. 19 px at 125 %), while charts and pictures keep their size – they would run into the block below.
+    // Rows with wrapped text keep Excel's fit.
+    {
+      const lastRow = tracker.toRange().e.r + 1;
+      for (let r = 1; r <= lastRow; r++) {
+        const row = worksheet.getRow(r);
+        if (row.height || row.hidden) continue;
+        let wraps = false;
+        row.eachCell(cell => { if (cell.alignment && cell.alignment.wrapText) wraps = true; });
+        if (!wraps) row.height = 15;
+      }
+      // a row taller than 20 px (a big-font text box line) pushes everything below it down: give the excess back
+      // in the following rows that hold nothing (no value, border or merge, no chart or picture over them), so
+      // blocks further down start where they do on the dashboard
+      const covered = new Set();
+      [...chartJobs.map(j => j.item), ...adjustedItems.filter(it => it.image)].forEach(it => {
+        for (let r = it.gridRow; r < it.gridRow + (it.allocatedRows || 0); r++) covered.add(r);
+      });
+      overlayImages.forEach(img => {
+        const host = adjustedItems.find(it => it.layout && String(it.layout.id) === img.host);
+        if (host) for (let r = host.gridRow; r < host.gridRow + (host.allocatedRows || 0); r++) covered.add(r);
+      });
+      const holdsNothing = ri => {
+        if (covered.has(ri)) return false;
+        let used = false;
+        worksheet.getRow(ri + 1).eachCell(cell => {
+          const b = cell.border || {};
+          if (cell.isMerged || (cell.value !== null && cell.value !== undefined && cell.value !== "") || b.top || b.bottom || b.left || b.right) used = true;
+        });
+        return !used;
+      };
+      const dashTop = Math.min(...adjustedItems.filter(it => it.layout).map(it => it.gridRow));
+      let drift = 0;
+      for (let ri = isFinite(dashTop) ? dashTop : lastRow; ri < lastRow; ri++) {
+        const row = worksheet.getRow(ri + 1);
+        if (row.hidden) continue;
+        const px = row.height ? Math.round(row.height * 4 / 3) : EXCEL_ROW_PX;
+        if (drift > 0 && px === EXCEL_ROW_PX && holdsNothing(ri)) {
+          const give = Math.min(drift, EXCEL_ROW_PX - 1);
+          row.height = Math.round((EXCEL_ROW_PX - give) * 0.75 * 4) / 4;
+          drift -= give;
+        } else drift += px - EXCEL_ROW_PX;
+        if (drift < 0) drift = 0;
+      }
+    }
     // final column widths / row heights in px: charts and pictures are fitted to their blocks with them
-    const colPx = ci => Math.floor((worksheet.getColumn(ci + 1).width || 8.43) * 7 + 5);
+    // a column's stored width already holds Excel's padding: 7 px per unit (Calibri 11), 64 px when unset
+    const colPx = ci => { const w = worksheet.getColumn(ci + 1).width; return w ? Math.round(w * 7) : 64; };
     const rowPx = ri => {                            // collapsed rows take no space on screen
       const row = worksheet.getRow(ri + 1);
       if (row.hidden) return 0;
@@ -719,13 +782,18 @@ setTableVisibleRows(placedItems);
       // tables widen the columns, so a chart kept at its Tableau pixel size would end short of the
       // tables / charts aligned with it on the dashboard → stretch it to the block's edges
       chartJobs.forEach(job => {
-        let w = 0, h = -job.rowOffPx;
+        let w = 0, h = 0;
         for (let c = job.item.gridCol; c < job.item.gridCol + job.item.gridW; c++) w += colPx(c);
-        for (let r = job.row; r < job.item.gridRow + job.item.allocatedRows; r++) h += rowPx(r);
-        const panes = job.item.visualModel.chartSpecs.length;     // stacked panes share the block height
-        job.widthPx = Math.max(160, w);
-        if (job.item.pairedCard) { job.colOffPx = 2; job.widthPx = Math.max(160, w - 4); }     // the card's white edges
-        job.heightPx = Math.max(60, panes > 1 ? Math.min(job.heightPx, h) : h);
+        for (let r = job.top; r < job.item.gridRow + job.item.allocatedRows; r++) h += rowPx(r);
+        job.widthPx = Math.max(40, w);
+        if (job.item.pairedCard) { job.colOffPx = 2; job.widthPx = Math.max(40, w - 4); }     // the card's white edges
+        // stacked panes split the block's real height (rows may be taller, shorter or collapsed), each from its own spot
+        const paneH = Math.floor(h / job.panes);
+        let r = job.top, off = job.pane * paneH;
+        for (let guard = 0; guard < 5000 && off >= rowPx(r) && (rowPx(r) > 0 || off > 0); guard++) { off -= rowPx(r); r++; }
+        job.row = r;
+        job.rowOffPx = off;
+        job.heightPx = Math.max(20, job.pane === job.panes - 1 ? h - job.pane * paneH : paneH);
       });
       try {
         buffer = await ExcelChartWriter.injectCharts(buffer, { sheetIndex: 0, charts: chartJobs });

@@ -364,6 +364,8 @@ interface ChartSeries {
   secondary?: boolean;
   /** line series: false = markers only */
   line?: boolean;
+  /** fill / line opacity 0–1 (Tableau's Color → Opacity) */
+  alpha?: number;
   marker?: boolean;
   markerSymbol?: string;
   markerSize?: number;
@@ -453,6 +455,9 @@ interface ChartSpec {
   labelCull?: boolean;
   /** reference lines across horizontal bars (drawn as vertical lines over the bars) */
   refLines?: RefLineStyle[];
+  /** doughnut: the hole as % of the ring; the text in the hole (lines of runs) */
+  holeSize?: number;
+  centerLabel?: { text: string; bold?: boolean; size?: number; color?: string; font?: string }[][];
   /** line chart drawn as a box plot: up/down bars + high-low lines */
   boxPlot?: { color: string };
   /** separate panes of one worksheet, stacked vertically */
@@ -486,6 +491,10 @@ interface ChartJob {
   rowOffPx?: number;
   widthPx: number;
   heightPx: number;
+  /** the chart block's first row under its title; which of how many stacked panes */
+  top?: number;
+  pane?: number;
+  panes?: number;
   item?: any;
 }
 
@@ -542,6 +551,10 @@ interface ExportItem {
   pairedCard?: boolean;
   /** KPI tile rebuilt from its Tableau label (export/kpi-card.js); null = label | value table */
   kpiCard?: import("./export/kpi-card.js").KpiCard | null;
+  /** relative widths of the columns the block needs in its zone (table fields, KPI tiles) */
+  split?: number[];
+  /** a table's column widths in px (Tableau's own, else from its content) */
+  splitPx?: number[];
   /** dashboard image object (logo, icon) with its own zone */
   image?: ImageBlock;
 }

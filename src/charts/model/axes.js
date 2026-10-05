@@ -73,7 +73,9 @@ export function tvApplyWorkbookAxes(spec, ctx) {
   if (primary.hidden) spec.valueAxisHidden = true;
   if (primary.title !== undefined) spec.valueTitle = primary.title;
   if (refs[1] && spec.series.some(s => s.secondary)) {
-    const second = fmt.axisInfo(refs[1], valueShelf, "1");
+    // class = which axis of that field: a second measure has its own first axis ("0"); the same field on
+    // both axes has its second one ("1")
+    const second = fmt.axisInfo(refs[1], valueShelf, tfSameField(refs[0], refs[1]) ? "1" : "0");
     if (second.hidden) spec.secondaryAxisHidden = true;
     if (second.title !== undefined) spec.secondaryTitle = second.title;
   }

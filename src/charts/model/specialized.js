@@ -1,5 +1,5 @@
 /* Pie, scatter, waterfall, box plot, Gantt, treemap, symbol map and packed bubble chart specs. */
-import { TV_MAX_POINTS, TV_MAX_SERIES, tvBaseSpec, tvCategories, tvColorScale, tvColorValues, tvHex, tvLabelsOn, tvMarkColor, tvMeasureLabel, tvNumFmt, tvPaneRule, tvSum, tvText } from "./common.js";
+import { TV_MAX_POINTS, TV_MAX_SERIES, tvBaseSpec, tvCategories, tvColorScale, tvColorValues, tvHex, tvLabelsOn, tvMarkColor, tvMarkToken, tvMeasureLabel, tvNumFmt, tvPaneLabel, tvPaneRule, tvSum, tvText } from "./common.js";
 import { tfDvNum, tfIsNull } from "../../data/values.js";
 import { tfFormatNumber } from "../../format/number-format.js";
 import { TABLEAU_10 } from "../../format/palettes.js";
@@ -21,7 +21,13 @@ export function tvPieSpec(ctx) {
   }
   const scale = tvColorScale(vm, roles, "pie");
   const spec = /** @type {ChartSpec} */ ({ ...tvBaseSpec(vm), kind: ctx.doughnut ? "doughnut" : "pie", legend: true });
-  let categories, values;
+  // Tableau's donut: a pie of slices (colour / angle) and, on the second axis, a smaller plain pie – the hole,
+  // in the background colour, carrying the total as its label
+  const piePanes = roles.panes.filter(p => tvMarkToken(p.markClass) === "pie");
+  const slicing = p => p.encodings.some(e => e.channel === "wedge-size" || e.channel === "color");
+  const slicePane = ctx.doughnut ? piePanes.find(slicing) || null : null;
+  const holePane = ctx.doughnut ? piePanes.find(p => p.id && !slicing(p)) || null : null;
+  let categories, values, cats = null;
   if ((roles.color && roles.color.measureNames) || (catCi < 0 && vm.cols.some(c => c.pivoted))) {
     const measures = vm.cols.map((c, i) => c.pivoted ? i : -1).filter(i => i >= 0);
     categories = { names: ["Measure Names"], levels: [measures.map(ci => tvMeasureLabel(vm, ci))] };
@@ -29,12 +35,17 @@ export function tvPieSpec(ctx) {
     angleCi = measures[0];
   } else {
     if (catCi < 0 || angleCi < 0) throw new Error("pie has no colour dimension or angle measure");
-    const cats = tvCategories(vm, [catCi], false);
+    cats = tvCategories(vm, [catCi], false);
     categories = { names: [tvMeasureLabel(vm, catCi)], levels: cats.levels };
     values = tvSum(vm, cats, angleCi);
   }
-  // a dual-pie donut's hole pane contributes a row with no category and no value → not a slice
-  const keep = categories.levels[0].map((label, i) => !(label === "Null" && !values[i]));
+  // a dual-pie donut's hole contributes a mark with no category: no value, or the total of the slices → not a slice
+  const total = values.reduce((s, v) => s + (v || 0), 0);
+  const nullish = l => /^(null|%null%|\(null\))?$/i.test(String(l == null ? "" : l).trim());
+  const isHole = i => nullish(categories.levels[0][i]) &&
+    (!values[i] || (ctx.doughnut && Math.abs(values[i] - (total - values[i])) <= Math.abs(values[i]) * 0.005));
+  const keep = categories.levels[0].map((_, i) => !isHole(i));
+  const kept = keep.map((k, i) => k ? i : -1).filter(i => i >= 0);
   if (keep.includes(false)) {
     categories = { ...categories, levels: categories.levels.map(lv => lv.filter((_, i) => keep[i])) };
     values = values.filter((_, i) => keep[i]);
@@ -58,6 +69,38 @@ export function tvPieSpec(ctx) {
     labelParts: { value: labelValue, category: labelCat, percent: labelPct },
     labelNumFmt: labelPct && !labelValue ? "0.0%" : undefined
   }];
+  if (slicePane && cats) {
+    // the field values as Tableau writes them (measures in their number format, empty for null)
+    const text = (row, ref) => {
+      const ci = vm.cols.findIndex(c => c.ref && tfSameField(c.ref, ref));
+      if (ci < 0 || !row || tfIsNull(row[ci])) return "";
+      const n = tfDvNum(row[ci]);
+      return vm.cols[ci].isHeader || n === null ? tvText(row[ci]) : tfFormatNumber(n, tvNumFmt(vm, ci));
+    };
+    const rowsOf = new Map();
+    vm.rows.forEach(r => { const i = cats.indexOf(r); if (i !== undefined && keep[i] && !rowsOf.has(i)) rowsOf.set(i, r); });
+    const flat = lines => lines.map(l => l.map(s => s.text).join("")).filter(t => t.trim()).join("\n");
+    // slice labels: only the slices' own marks card (blank until its label fields have values)
+    const texts = kept.map(i => flat(tvPaneLabel(slicePane, ref => text(rowsOf.get(i), ref))));
+    const labelled = texts.some(Boolean) && slicePane.style && tvPaneRule(slicePane, "mark", "mark-labels-show") !== "false";
+    Object.assign(spec.series[0], { labels: labelled, labelTexts: labelled ? texts : undefined, labelParts: undefined, labelNumFmt: undefined });
+    if (holePane) {
+      // the hole's label: its fields over all the slices (the total), in its runs' fonts
+      const sumOf = ref => {
+        const ci = vm.cols.findIndex(c => c.ref && tfSameField(c.ref, ref));
+        if (ci < 0) return "";
+        if (vm.cols[ci].isHeader) return "";
+        const s = vm.rows.reduce((acc, r) => { const i = cats.indexOf(r); return i !== undefined && keep[i] ? acc + (tfDvNum(r[ci]) || 0) : acc; }, 0);
+        return tfFormatNumber(s, tvNumFmt(vm, ci));
+      };
+      spec.centerLabel = tvPaneLabel(holePane, sumOf).filter(l => l.some(s => s.text.trim())).map(l => l.map(s => ({
+        text: s.text, bold: !!s.props.bold, size: s.props.fontSize, color: tvHex(s.props.color) || undefined, font: s.props.fontName })));
+      // the hole's size against the ring's (the marks' Size sliders)
+      const sizeOf = p => Number(tvPaneRule(p, "mark", "size"));
+      const ratio = sizeOf(holePane) / sizeOf(slicePane);
+      if (ratio > 0 && ratio < 1) spec.holeSize = Math.round(Math.max(10, Math.min(90, ratio * 100)));
+    }
+  }
   return [spec];
 }
 

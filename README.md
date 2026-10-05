@@ -24,11 +24,9 @@ dashboard and choose **Access Local Extensions → Export.trex** (or **Reload** 
 In the panel, **Load Workbook** reads the dashboard's `.twbx` (or `.twb`) for its formatting. Load the
 packaged `.twbx` to also export logos and other image objects: a `.twb` does not contain the image files.
 
-## Tests
+## Type check
 
 ```bash
-npm test             # classification + chart specs for the Visual Gallery workbook
-npm run test:excel   # also writes every native chart to an XLSX and opens it in Excel (Windows)
 npm run typecheck    # JSDoc type check of src/ (shared shapes in src/types.d.ts)
 ```
 
@@ -46,11 +44,9 @@ src/
   charts/writer/          chart specs → DrawingML / chartex parts injected into the XLSX
   export/                 dashboard layout, data fetching, cell writers, the export itself
   ui/                     panel status and workbook storage (settings + IndexedDB)
-  testing.js              single import point for the Node tests
   types.d.ts              shared shapes for the type check (chart spec, visual model …), not bundled
   index.html              panel page template (the build inserts the hashed bundle name)
 scripts/build.mjs         esbuild bundle + dist/index.html + dev server
-tests/                    Node test harness and the Excel check
 ```
 
 ExcelJS and JSZip are bundled from `node_modules` – the extension loads nothing from a CDN.

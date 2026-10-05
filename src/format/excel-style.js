@@ -19,7 +19,9 @@ export function tfExcelFont(p) {
 }
 
 export function tfExcelAlignment(p, isNumber) {
-  return { horizontal: p.hAlign || (isNumber ? "right" : "left"), vertical: p.vAlign || "middle", wrapText: !!p.wrap };
+  // a number shrinks to its column (columns keep the dashboard's widths) instead of showing ####
+  return { horizontal: p.hAlign || (isNumber ? "right" : "left"), vertical: p.vAlign || "middle", wrapText: !!p.wrap,
+           ...(isNumber && !p.wrap ? { shrinkToFit: true } : {}) };
 }
 
 /** @param {string} argb @returns {import("exceljs").Fill | undefined} */

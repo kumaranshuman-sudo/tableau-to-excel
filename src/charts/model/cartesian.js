@@ -1,6 +1,7 @@
 /* Bar / line / area / combo / funnel / histogram chart specs. */
-import { TV_MAX_POINTS, TV_MAX_SERIES, tvBaseSpec, tvCategories, tvColorScale, tvColorValues, tvHex, tvLabelsOn, tvMarkColor, tvMarkToken, tvMeasureLabel, tvMeasureMark, tvNumFmt, tvSeriesType, tvSum, tvText } from "./common.js";
+import { TV_MAX_POINTS, TV_MAX_SERIES, tvBaseSpec, tvCategories, tvColorScale, tvColorValues, tvHex, tvLabelsOn, tvMarkColor, tvMarkToken, tvMeasureLabel, tvMeasureMark, tvNumFmt, tvPaneRule, tvSeriesType, tvSum, tvText } from "./common.js";
 import { tfDvNum } from "../../data/values.js";
+import { tfArgb } from "../../format/colors.js";
 import { TABLEAU_10 } from "../../format/palettes.js";
 import { tfParseFieldRef, tfSameField } from "../../twb/field-ref.js";
 
@@ -38,7 +39,7 @@ export function tvCartesianSpecs(ctx) {
   const seriesFor = (m, opts) => {
     const label = tvMeasureLabel(vm, m.ci);
     const labels = tvLabelsOn(roles, m.ref);
-    if (colorCi >= 0 && colorLevel < 0) {
+    if (colorCi >= 0 && colorLevel < 0 && !opts.noColorSplit) {
       const values = tvColorValues(vm, roles);
       return values.map((v, i) => ({
         name: opts.prefix ? `${label} – ${v}` : v,
@@ -48,7 +49,8 @@ export function tvCartesianSpecs(ctx) {
       }));
     }
     return [{ name: label, values: tvSum(vm, cats, m.ci), color: opts.color, labels,
-              pointColors: opts.noPointColors ? undefined : pointColors, ...opts.type }];
+              pointColors: opts.noPointColors ? undefined : pointColors, ...opts.type,
+              ...(opts.alpha !== undefined ? { alpha: opts.alpha } : {}) }];
   };
 
   const make = (series, extra) => {
@@ -200,11 +202,22 @@ export function tvCartesianSpecs(ctx) {
   const marks = measures.map((m, i) => tvMeasureMark(roles, m.ref, sheetMark, i, measures.length));
   if (new Set(marks).size > 1 && measures.length <= 4) {
     const series = [];
-    measures.forEach((m, i) => seriesFor(m, {
-      type: { ...tvSeriesType(marks[i]), secondary: measures.length === 2 && i === 1 },
-      color: (color && color.measureNames && scale ? scale(vm.cols[m.ci].name, i) : null) || tvHex(TABLEAU_10[i % TABLEAU_10.length]),
-      prefix: colorCi >= 0, noPointColors: true
-    }).forEach(s => series.push(s)));
+    const colourPanes = roles.panes.filter(p => p.encodings.some(e => e.channel === "color"));
+    measures.forEach((m, i) => {
+      // each axis has its own marks card: the colour field splits only the measure whose card holds it
+      // (a KPI trend's min / max dots, not its area); the others keep their card's colour and opacity
+      const pane = paneOfAxis(m.axis || 0);
+      const split = !pane || !colourPanes.length || colourPanes.includes(pane);
+      const own = pane ? tvHex(tfArgb(tvPaneRule(pane, "mark", "mark-color"))) : null;
+      const opacity = pane ? Number(tvPaneRule(pane, "mark", "mark-transparency")) : NaN;
+      seriesFor(m, {
+        type: { ...tvSeriesType(marks[i]), secondary: measures.length === 2 && i === 1 },
+        color: (color && color.measureNames && scale ? scale(vm.cols[m.ci].name, i) : null) || (!split && own) ||
+               tvHex(TABLEAU_10[i % TABLEAU_10.length]),
+        prefix: colorCi >= 0 && split, noPointColors: true, noColorSplit: !split,
+        alpha: opacity >= 0 && opacity < 255 ? opacity / 255 : undefined
+      }).forEach(s => series.push(s));
+    });
     return [make(series, {
       numFmt: tvNumFmt(vm, measures[0].ci), valueTitle: tvMeasureLabel(vm, measures[0].ci),
       secondaryNumFmt: tvNumFmt(vm, measures[1].ci),

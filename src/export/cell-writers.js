@@ -4,29 +4,40 @@ import { writeTableauTitle } from "./visual-writers.js";
 import { tfExcelFont, tfRichRuns } from "../format/excel-style.js";
 import { tfMerge } from "../twb/formatter.js";
 
-/* ── Write Individual Filter Value Table ──────────────────────────────── */
-export function writeIndividualFilterTable(worksheet, filterName, filterValues, originRow, originCol, rangeTracker, header = "SELECTED VALUE(S)") {
-  let r = originRow;
-  const C = originCol;
-
-  let cleanName = filterName.replace(/_(Filter|filter)_\d+$/, '');
-  cleanName = cleanName.replace(/_(Values|values)_\d+$/, '');
-
-  titleCell(worksheet, r, C, `📋 ${cleanName}`);
-  rangeTracker.update(r, C);
-  r++;
-
-  tableHeaderCell(worksheet, r, C, header);
-  rangeTracker.update(r, C);
-  r++;
-
+/* ── Quick filter / parameter control ───────────────────────────────────
+ * As Tableau draws one: its caption, then the value(s) in a white box with a thin grey border, across the
+ * control's zone. */
+export function writeIndividualFilterTable(worksheet, filterName, filterValues, originRow, originCol, rangeTracker, width = 1) {
+  const C = originCol, W = Math.max(1, width);
+  const cleanName = filterName.replace(/_(Filter|filter)_\d+$/, "").replace(/_(Values|values)_\d+$/, "");
+  const font = tfExcelFont({ ...TABLEAU_DEFAULTS.worksheet, fontSize: 9, color: "FF333333" });     // Tableau fonts → their substitute
+  const span = r => { if (W > 1) { try { worksheet.mergeCells(r + 1, C + 1, r + 1, C + W); } catch (e) { /* already merged */ } } };
+  const caption = worksheet.getCell(originRow + 1, C + 1);
+  caption.value = cleanName;
+  caption.font = { ...font, bold: true };
+  caption.alignment = { horizontal: "left", vertical: "bottom" };
+  span(originRow);
+  rangeTracker.update(originRow, C);
+  rangeTracker.update(originRow, C + W - 1);
   const values = Array.isArray(filterValues) ? filterValues : [filterValues];
+  /** @type {Partial<import("exceljs").Border>} */
+  const edge = { style: "thin", color: { argb: "FFBFBFBF" } };
   values.forEach((value, idx) => {
-    tableDataCell(worksheet, r + idx, C, value, idx);
-    rangeTracker.update(r + idx, C);
+    const r = originRow + 1 + idx;
+    for (let c = C; c < C + W; c++) {
+      const cell = worksheet.getCell(r + 1, c + 1);
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFFFFF" } };
+      cell.border = { top: idx === 0 ? edge : undefined, bottom: idx === values.length - 1 ? edge : undefined,
+                      left: c === C ? edge : undefined, right: c === C + W - 1 ? edge : undefined };
+    }
+    const cell = worksheet.getCell(r + 1, C + 1);
+    cell.value = value;
+    cell.font = font;
+    cell.alignment = { horizontal: "left", vertical: "middle", shrinkToFit: true };
+    span(r);
+    rangeTracker.update(r, C + W - 1);
   });
-
-  return 2 + values.length;
+  return 1 + values.length;
 }
 
 /* ── ExcelJS Cell Styling Functions ───────────────────────────────────── */

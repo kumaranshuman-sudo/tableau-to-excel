@@ -2,7 +2,7 @@
 import { FORMAT_CONFIG } from "../config.js";
 import { tfDvText, tfIsNull } from "../data/values.js";
 import { applyConditionalFormattingToTable } from "./conditional-format.js";
-import { ROW_GROUP_THRESHOLD, getExcelColumnName } from "./layout.js";
+import { ROW_GROUP_THRESHOLD, getExcelColumnName, headerRowSpan } from "./layout.js";
 import { tfBuildColorScale } from "../format/color-scale.js";
 import { tfExcelFill, tfExcelFont, tfWriteCell } from "../format/excel-style.js";
 import { tfParseFieldRef, tfSameField } from "../twb/field-ref.js";
@@ -78,6 +78,28 @@ export function writeKPICardStacked(worksheet, vm, originRow, originCol, rangeTr
   return (vm.showTitle ? 1 : 0) + order.length;
 }
 
+/**
+ * Each table column's width in px, as the table is drawn: the width Tableau stores for the field (or for
+ * Measure Names, or its text-box header), else an estimate from its label and values in their font.
+ * @param {ViewModel} vm @returns {number[]} one per vm.order entry
+ */
+export function tableColumnPx(vm) {
+  const { fmt, cols, rows, order } = vm;
+  return order.map(ci => {
+    const info = cols[ci];
+    const measureNamesRef = info.pivoted ? tfParseFieldRef("[:Measure Names]") : null;
+    const px = fmt.widthPx(info.ref) || (measureNamesRef && fmt.widthPx(measureNamesRef)) || info.zoneWidthPx;
+    if (px) return px;
+    const style = info.isHeader ? fmt.headerCellStyle(info.ref) : fmt.markCellStyle(info.ref);
+    const scale = (style.fontSize || 9) / 11;
+    let len = Math.min((info.label || "").length, 24);
+    for (let i = 0; i < Math.min(rows.length, 200); i++) {
+      len = Math.max(len, tfDvText(rows[i][ci]).split("\n").reduce((m, l) => Math.max(m, l.length), 0));
+    }
+    return Math.min(50, Math.ceil(len * scale * 1.15) + 2) * 7;
+  });
+}
+
 export function writeRegularTable(worksheet, vm, originRow, originCol, rangeTracker, allTablesInfo, colWidths, exactWidths,
                                   visibleRows = ROW_GROUP_THRESHOLD) {
   let r = originRow;
@@ -130,8 +152,9 @@ export function writeRegularTable(worksheet, vm, originRow, originCol, rangeTrac
 
   const numericCol = ci => { const d = rows.find(rw => !tfIsNull(rw[ci])); return !!d && typeof (d[ci].nativeValue !== undefined ? d[ci].nativeValue : d[ci].value) === "number"; };
 
-  const headerRow = r;
+  let headerRow = r;
   if (vm.showHeaderRow) {
+    const span = headerRowSpan(vm);
     order.forEach((ci, k) => {
       const info = cols[ci];
       let p = fmt.fieldLabelStyle(info.ref, !info.isHeader);
@@ -143,11 +166,23 @@ export function writeRegularTable(worksheet, vm, originRow, originCol, rangeTrac
         fill: p.bgColor || tableBg || undefined,
         border: { bottom: borderSide(rowDiv), right: k < numCols - 1 ? borderSide(colDiv) : undefined }
       });
-      rangeTracker.update(r, C + k);
+      // Tableau's header height as 20 px rows merged down; the label wraps in it, centred as Tableau draws it
+      // (which also keeps it clear of the filter buttons on the last row)
+      if (span > 1) {
+        const cell = worksheet.getCell(r + 1, C + k + 1);
+        cell.alignment = { ...(cell.alignment || {}), wrapText: true };
+        for (let i = 1; i < span; i++) worksheet.getCell(r + 1 + i, C + k + 1).border = cell.border;
+        worksheet.mergeCells(r + 1, C + k + 1, r + span, C + k + 1);
+        for (let i = 0; i < span; i++) worksheet.getRow(r + 1 + i).height = 15;
+      }
+      rangeTracker.update(r + span - 1, C + k);
     });
-    const hpx = fmt.headerRowHeightPx();                    // only a height Tableau stores explicitly
-    if (hpx) worksheet.getRow(r + 1).height = Math.round(hpx * 0.75);
-    r++;
+    // wrapped labels and no height stored: at most two lines, not a row Excel grows to fit every word
+    if (span === 1 && !fmt.headerRowHeightPx() && order.some(ci => /\n/.test(cols[ci].label) || cols[ci].label.length > 18)) {
+      worksheet.getRow(r + 1).height = 26;
+    }
+    headerRow = r + span - 1;                                // the filter buttons go on the header's last row
+    r += span;
   }
 
   const dataStartRow = r;

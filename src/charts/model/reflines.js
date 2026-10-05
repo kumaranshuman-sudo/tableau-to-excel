@@ -1,6 +1,7 @@
 /* Analytics → Reference Line on a chart spec, valued, labelled and styled like Tableau. */
 import { tableauToExcelNumFmt } from "../../format/number-format.js";
 import { tfSameField } from "../../twb/field-ref.js";
+import { tvMeasureLabel } from "./common.js";
 
 const COMPUTATION = { average: "Average", mean: "Average", median: "Median", sum: "Sum", total: "Total",
                       min: "Minimum", max: "Maximum", constant: "Constant" };
@@ -59,14 +60,27 @@ export function tvApplyReferenceLines(spec, ctx) {
   const valueShelf = roles.rows.values.length ? "rows" : roles.cols.values.length ? "cols" : null;
   if (!lines.length || !valueShelf) return;
   const measures = roles[valueShelf].values.map(v => v.ref).filter(Boolean);
-  const data = spec.series.filter(s => !s.refLine && !s.secondary && s.color !== null);     // not invisible helper series
-  const values = data.flatMap(s => s.values || []).filter(v => typeof v === "number" && isFinite(v));
+  const drawn = spec.series.filter(s => !s.refLine && s.color !== null);                   // not invisible helper series
+  const numbers = list => list.flatMap(s => s.values || []).filter(v => typeof v === "number" && isFinite(v));
+  /* the series a line is computed over: its measure's (value-column, else the axis it sits on) –
+     a dual-axis chart has one per measure; without a match, the primary axis's series */
+  const seriesOf = rl => {
+    const ref = rl.field || rl.axis;
+    const m = ref && roles[valueShelf].values.find(v => v.ref && tfSameField(v.ref, ref));
+    if (m) {
+      const label = tvMeasureLabel(vm, m.ci).trim();
+      const own = drawn.filter(s => { const n = s.name.trim(); return n === label || n.startsWith(label + " – "); });
+      if (own.length) return own;
+    }
+    return drawn.filter(s => !s.secondary);
+  };
   const style = fmt.reflineStyle();
   const hidden = style.lineVisible === false || style.strokeSize === 0;
   const valueFmt = (style.numFmtRaw && tableauToExcelNumFmt(style.numFmtRaw)) || spec.numFmt || "General";
   lines.forEach(rl => {
     if (rl.axis && measures.length && !measures.some(m => tfSameField(m, rl.axis))) return;   // another measure's axis
-    const value = tvReferenceValue(rl, values);
+    const data = seriesOf(rl);
+    const value = tvReferenceValue(rl, numbers(data));
     if (value === null) return;
     const labelFmt = tvReferenceLabelFormat(rl, valueFmt);
     if (hidden && !labelFmt) return;
@@ -75,7 +89,9 @@ export function tvApplyReferenceLines(spec, ctx) {
                    width: style.strokeSize || 1, dash: style.dash === "dashed", hidden,
                    font: { color: style.color ? style.color.slice(2) : undefined, bold: style.bold } };
     if (spec.barDir === "bar" && data.some(s => (s.type || spec.kind) === "bar")) (spec.refLines = spec.refLines || []).push(line);
+    // drawn on its measure's axis: on a dual-axis chart that may be the secondary one
     else spec.series.push({ name: (labelFmt || "Reference line").replace(/"/g, ""), type: "line", color: line.color, line: !hidden,
+                            ...(data.length && data.every(s => s.secondary) ? { secondary: true } : {}),
                             marker: false, labels: false, values: spec.categories.levels[0].map(() => value), refLine: line });
   });
 }

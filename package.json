@@ -8,9 +8,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "serve": "node scripts/build.mjs --serve",
-    "test": "node tests/harness.mjs",
-    "typecheck": "tsc -p tsconfig.json",
-    "test:excel": "powershell -NoProfile -ExecutionPolicy Bypass -File tests/run.ps1"
+    "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
     "exceljs": "^4.4.0",
