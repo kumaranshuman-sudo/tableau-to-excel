@@ -33,7 +33,7 @@ export const CT_CHARTCOLORS = "application/vnd.ms-office.chartcolorstyle+xml";
 
 export const EMU_PER_PX = 9525;
 
-export const AX = { cat: 50010, val: 50020, cat2: 50030, val2: 50040 };
+export const AX = { cat: 50010, val: 50020, cat2: 50030, val2: 50040, x2: 50050, y2: 50060 };
 
 export const C15 = "http://schemas.microsoft.com/office/drawing/2012/chart";
 

@@ -267,6 +267,86 @@ export function createSheetFormatter(model, sheetName) {
 
     /* header label hidden via Format → "Hide" (label display=false) */
     isLabelHidden(ref) { return tfCollect(st, ["label"], { field: ref }).display === false; },
+
+    /* an axis on a shelf: "Show Header" off (display=false) and Edit Axis → title ("" = no title).
+     * cls "0" / "1" = primary / secondary axis of a dual axis; rules without a class apply to both */
+    axisInfo(ref, shelf, cls) {
+      /** @type {{ hidden?: boolean, title?: string }} */
+      const out = {};
+      if (!st || !ref) return out;
+      /** @type {Record<string, string>[]} */
+      const tiers = [{}, {}];                                 // without scope < with scope
+      for (const f of st.rules.axis || []) {
+        if (f.attr !== "display" && f.attr !== "title") continue;
+        if (!f.field || !tfSameField(tfParseFieldRef(f.field), ref)) continue;
+        if (f.scope && f.scope !== shelf) continue;
+        if (f.axisClass !== undefined && cls !== undefined && f.axisClass !== cls) continue;
+        tiers[f.scope ? 1 : 0][f.attr] = f.value;
+      }
+      const v = { ...tiers[0], ...tiers[1] };
+      if (v.display !== undefined) out.hidden = v.display === "false";
+      if (v.title !== undefined) out.title = v.title;
+      return out;
+    },
+    /* grid lines across a shelf's axis (Format → Lines → Grid Lines): off = stroke 0 or line-visibility off */
+    gridlinesShown(shelf) {
+      const g = tfMerge(tfCollect(wb, ["gridline"], { scope: shelf }), tfCollect(st, ["gridline"], { scope: shelf }));
+      return !(g.strokeSize === 0 || g.lineVisible === false);
+    },
+    /* Analytics → Reference Line entries of the worksheet */
+    referenceLines() { return (sheet && sheet.referenceLines) || []; },
+    /* Edit Axis for a field on a shelf: fixed range, tick spacing, include zero */
+    axisSpace(ref, shelf, cls) {
+      /** @type {AxisSpace} */
+      let out = {};
+      if (!st || !st.spaces || !ref) return out;
+      for (const s of st.spaces) {
+        if (!s.field || !tfSameField(tfParseFieldRef(s.field), ref) || (s.scope && s.scope !== shelf)) continue;
+        if (s.axisClass !== undefined && cls !== undefined && s.axisClass !== cls) continue;
+        out = s;
+      }
+      return out;
+    },
+    /* a header's label format (Format → Header → Dates), e.g. "iLLLLL" = month initial */
+    labelFormat(ref) { return ref ? tfCollect(st, ["label"], { field: ref }).numFmtRaw || null : null; },
+    /** mark label font (datalabel element); its colour only when the user picked one, not "automatic"
+     * @returns {Record<string, any>} */
+    dataLabelStyle() {
+      const raw = {};
+      const pool = [wb, st, ...owningPanes(null).map(p => p.style)];      // workbook, worksheet, marks card
+      for (const s of pool) for (const f of (s && s.rules.datalabel) || []) if (!f.field) raw[f.attr] = f.value;
+      const p = tfMerge(...pool.map(s => tfCollect(s, ["datalabel"])));
+      if (raw["color-mode"] && raw["color-mode"] !== "user") delete p.color;
+      return p;
+    },
+    /** the mark label's text around its one field ("<AGG(Days)> DAYS" → prefix "", suffix " DAYS"); null when
+     * the label is the default, or holds several fields
+     * @returns {{ ref: FieldRef, prefix: string, suffix: string } | null} */
+    labelTemplate() {
+      const pane = owningPanes(null)[0];
+      if (!pane || !pane.labelRuns.length) return null;
+      const text = pane.labelRuns.map(r => r.text).join("");
+      const tokens = [...text.matchAll(/<([^<>]+)>/g)];
+      const ref = tokens.length === 1 ? tfParseFieldRef(tokens[0][1]) : null;
+      if (!ref) return null;
+      const t = tokens[0], flat = s => s.replace(/\u00C6[ \t]*(?:\r?\n)?|\r?\n/g, " ");
+      return { ref, prefix: flat(text.slice(0, t.index)), suffix: flat(text.slice(t.index + t[0].length)) };
+    },
+    /** reference line formatting: line colour (and its opacity), width, dash, visibility; label font / format
+     * @returns {Record<string, any>} */
+    reflineStyle() {
+      const raw = {};
+      const pool = [wb, st, ...owningPanes(null).map(p => p.style)];
+      for (const s of pool) for (const f of (s && s.rules.refline) || []) if (!f.field && !f.scope) raw[f.attr] = f.value;
+      const alpha = /^#?[0-9a-f]{8}$/i.test(raw["stroke-color"] || "") ? parseInt(raw["stroke-color"].replace(/^#/, "").slice(6), 16) / 255 : 1;
+      return { ...tfMerge(...pool.map(s => tfCollect(s, ["refline"]))), dash: raw["line-pattern-only"] || null, strokeAlpha: alpha };
+    },
+
+    /* axis rulers (Format → Lines → Axis Rulers) */
+    axisLineShown(shelf) {
+      const a = tfMerge(tfCollect(wb, ["axis"], { scope: shelf }), tfCollect(st, ["axis"], { scope: shelf }));
+      return !(a.strokeSize === 0 || a.lineVisible === false);
+    },
     /* "Show field labels for rows/columns" (worksheet display-field-labels) */
     fieldLabelsShown(scope) {
       const v = tfCollect(st, ["worksheet"], { scope }).displayFieldLabels;

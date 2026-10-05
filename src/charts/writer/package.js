@@ -6,6 +6,30 @@ import { CT_CHART, CT_CHARTCOLORS, CT_CHARTEX, CT_CHARTSTYLE, CT_DRAWING, EMPTY_
 import { chartXml } from "./drawingml.js";
 import { attr, esc } from "./xml-util.js";
 
+/** <sheetPr> children in schema order (tabColor, outlinePr, pageSetUpPr): ExcelJS writes pageSetUpPr first
+ * when a sheet has both fit-to-page and outline groups, and Excel then refuses to open the file.
+ * Anything else inside <sheetPr> leaves it as it is. @param {string} xml @returns {string} */
+export function orderSheetPr(xml) {
+  return xml.replace(/<sheetPr\b([^>]*)>([\s\S]*?)<\/sheetPr>/, (m, attrs, inner) => {
+    const pick = tag => (inner.match(new RegExp(`<${tag}\\b[^>]*?(?:\\/>|>[\\s\\S]*?<\\/${tag}>)`)) || [""])[0];
+    const out = pick("tabColor") + pick("outlinePr") + pick("pageSetUpPr");
+    return out.length === inner.length ? `<sheetPr${attrs}>${out}</sheetPr>` : m;
+  });
+}
+
+/** the package with every worksheet's <sheetPr> in schema order (unchanged buffer when nothing moves)
+ * @param {ArrayBuffer | Uint8Array} buffer */
+export async function fixSheetProperties(buffer) {
+  const zip = await JSZip.loadAsync(buffer);
+  let changed = false;
+  for (const name of Object.keys(zip.files).filter(n => /^xl\/worksheets\/sheet\d+\.xml$/.test(n))) {
+    const xml = await zip.file(name).async("string");
+    const fixed = orderSheetPr(xml);
+    if (fixed !== xml) { zip.file(name, fixed); changed = true; }
+  }
+  return changed ? zip.generateAsync({ type: "uint8array", compression: "DEFLATE" }) : buffer;
+}
+
 /** @param {ChartJob} chart @param {number} id @param {string} rid */
 export function anchorXml(chart, id, rid) {
   const cx = Math.max(1, Math.round(chart.widthPx * EMU_PER_PX));
@@ -153,12 +177,13 @@ export async function injectCharts(buffer, opts) {
     }
     const n = nextFreeIndex(zip, "xl/charts/chart", ".xml");
     const chartPath = `xl/charts/chart${n}.xml`;
-    zip.file(chartPath, chartXml(chart.spec, chart.refs));
+    zip.file(chartPath, chartXml(chart.spec, chart.refs, chart));
     ct = addOverride(ct, chartPath, CT_CHART);
     drawingRels = addRel(drawingRels, rid, REL_CHART, `../charts/chart${n}.xml`);
     anchors += anchorXml(chart, shapeId++, rid);
   }
-  drawingXml = drawingXml.replace("</xdr:wsDr>", anchors + "</xdr:wsDr>");
+  // charts first: pictures ExcelJS placed (icons over a chart) stay in front of them
+  drawingXml = drawingXml.replace(/(<xdr:wsDr\b[^>]*>)/, (m) => m + anchors);
   if (newNames.length) {                         // CT_Workbook: definedNames follow sheets
     const defs = newNames.join("");
     const wb = wbXml.includes("</definedNames>") ? wbXml.replace("</definedNames>", defs + "</definedNames>")

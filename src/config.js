@@ -20,8 +20,10 @@ export const FORMAT_CONFIG = {
   groupOverflowRows: true,        // collapse rows beyond ROW_GROUP_THRESHOLD into an expandable [+]/[-] group
   autoFilter: "largest",          // Excel allows ONE autofilter per sheet: "largest" table | "none"
   textBoxHeaders: true,           // use dashboard text boxes as column headers – only when they line up exactly with the table
-  textBoxTitle: true,             // use the top dashboard text box as the dashboard title (rich text)
+  textBoxTitle: false,            // text boxes are drawn in place now; true = also use the top one as the sheet title
   linkText: "url",                // URL-action cells: "url" shows the link itself, any other string is shown as the text
+  sheetGridlines: false,          // Excel's cell grid on the dashboard sheet – Tableau dashboards have none
+  printFitToWidth: true,          // printing / PDF: the dashboard one page wide, landscape when it is wider than tall
   debug: true
 };
 

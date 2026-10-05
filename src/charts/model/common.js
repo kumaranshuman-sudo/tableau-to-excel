@@ -2,6 +2,7 @@
 import { tfDvNum, tfDvText, tfIsNull, tfNaturalCompare } from "../../data/values.js";
 import { tfBuildColorScale } from "../../format/color-scale.js";
 import { tfArgb } from "../../format/colors.js";
+import { tfFormatDateLabel } from "../../format/date-format.js";
 import { tfExcelFont } from "../../format/excel-style.js";
 import { inferExcelNumFmt, tableauToExcelNumFmt } from "../../format/number-format.js";
 import { TABLEAU_10 } from "../../format/palettes.js";
@@ -145,6 +146,15 @@ export function tvColorValues(vm, roles) {
   return values;
 }
 
+/** a header's date label format (Format → Header → Dates: "iLLLLL" → J F M …)
+ * @param {ViewModel} vm @param {number} ci @returns {(text: string, dv: DataValue) => string} */
+export function tvLabelFormatter(vm, ci) {
+  const col = vm.cols[ci];
+  const raw = col && col.ref && vm.fmt.labelFormat ? vm.fmt.labelFormat(col.ref) : null;
+  if (!raw) return t => t;
+  return (text, dv) => tfFormatDateLabel(raw, text, dv) ?? text;
+}
+
 /* ── category axis: distinct label tuples in view order ─────────────────── */
 /**
  * @param {ViewModel} vm
@@ -168,9 +178,12 @@ export function tvCategories(vm, catCis, sortNative) {
   }
   if (!catCis.length) order = [{ key: "", labels: [""] }];
   const index = new Map(order.map((o, i) => [o.key, i]));
+  // shown labels follow each header's date format (J F M …); the keys stay the raw values, so January,
+  // June and July remain three categories even when all are labelled "J"
+  const shown = catCis.map(ci => tvLabelFormatter(vm, ci));
   return {
     count: order.length,
-    levels: (catCis.length ? catCis : [null]).map((_, l) => order.map(o => o.labels[l])),
+    levels: (catCis.length ? catCis : [null]).map((_, l) => order.map(o => catCis.length ? shown[l](o.labels[l], o.dvs[l]) : o.labels[l])),
     indexOf: row => index.get(catCis.map(ci => tvText(row[ci])).join("\u0001"))
   };
 }

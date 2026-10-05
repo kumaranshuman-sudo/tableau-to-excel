@@ -1,5 +1,6 @@
 /* Dashboard layout → Excel grid: positions, sizes and collision handling. */
 import { FORMAT_CONFIG } from "../config.js";
+import { classifyImageObjects } from "./images.js";
 
 /* ── Layout constants ─────────────────────────────────────────────────── */
 export const PX_PER_COL  = 90;
@@ -83,14 +84,23 @@ export function snapEdges(values, tolerance = SNAP_PX) {
 
 /* ── buildLayoutMap ─────────────────────────────────────────────────── */
 /* Tableau's DashboardObject: position = { x, y }, size = { width, height } (px) */
+/* Tableau's DashboardObjectType → the kinds laid out on the sheet ("filter" / "parameter" as older
+ * test fixtures spell them); a DashboardObject's id is its zone id in the workbook */
+export const OBJECT_KIND = Object.freeze({ worksheet: "worksheet", "quick-filter": "filter", filter: "filter",
+                                           "parameter-control": "parameter", parameter: "parameter", text: "text", image: "image" });
+
 export function buildLayoutMap(dashboardObjects, titleMap = {}) {
   const map = new Map();
-  
+  // images with their own zone (logos) take part in the layout; backgrounds, dividers and icons
+  // floating over a sheet do not (export/images.js)
+  const images = classifyImageObjects(dashboardObjects || []);
+
   const positionableObjects = (dashboardObjects || []).filter(
-    (obj) => (obj.type === "worksheet" || obj.type === "filter" || obj.type === "parameter") &&
+    (obj) => OBJECT_KIND[obj.type] &&
              obj.position &&
              typeof obj.position.x === "number" &&
-             typeof obj.position.y === "number"
+             typeof obj.position.y === "number" &&
+             (obj.type !== "image" || (images.get(String(obj.id)) || {}).kind === "block")
   );
 
   if (positionableObjects.length === 0) return map;
@@ -113,8 +123,10 @@ export function buildLayoutMap(dashboardObjects, titleMap = {}) {
     const gridW = Math.max(2, Math.round((width || 180) / PX_PER_COL));
     const gridH = Math.max(3, Math.round((height || 60) / PX_PER_ROW));
     
+    const kind = OBJECT_KIND[obj.type];
     let displayName = "";
-    if (obj.type === "worksheet") {
+    if (kind === "text" || kind === "image") displayName = "";
+    else if (kind === "worksheet") {
       displayName = titleMap[obj.name]
                  || (obj.title && obj.title.trim() ? obj.title.trim() : null)
                  || obj.name;
@@ -122,17 +134,23 @@ export function buildLayoutMap(dashboardObjects, titleMap = {}) {
       displayName = (obj.name || "Filter").replace(/[_-]/g, " ");
     }
 
-    const key = obj.name || `filter_${gridRow}_${gridCol}`;
+    // text boxes and images have no unique name – keyed by their zone id
+    const key = kind === "text" || kind === "image" ? `${kind}:${obj.id}` : obj.name || `filter_${gridRow}_${gridCol}`;
     // a quick filter can carry its worksheet's name – the worksheet keeps its own position and size
-    if (obj.type !== "worksheet" && map.has(key) && map.get(key).type === "worksheet") return;
+    if (kind !== "worksheet" && map.has(key) && map.get(key).type === "worksheet") return;
     map.set(key, {
-      type: obj.type,
+      type: kind,
+      id: obj.id,
       gridRow: Math.max(0, gridRow),
       gridCol: Math.max(0, gridCol),
       gridW,
+      // right edge on the grid: tiles in a strip end where the next one starts
+      gridRight: width ? Math.round((snapX(px.x + width) - minX) / PX_PER_COL) : gridCol + gridW,
       gridH,
       widthPx: width || null,
       heightPx: height || null,
+      xPx: px.x,
+      yPx: px.y,
       displayName,
       originalName: obj.name
     });

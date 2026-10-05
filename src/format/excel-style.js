@@ -22,6 +22,7 @@ export function tfExcelAlignment(p, isNumber) {
   return { horizontal: p.hAlign || (isNumber ? "right" : "left"), vertical: p.vAlign || "middle", wrapText: !!p.wrap };
 }
 
+/** @param {string} argb @returns {import("exceljs").Fill | undefined} */
 export function tfExcelFill(argb) {
   return argb ? { type: "pattern", pattern: "solid", fgColor: { argb } } : undefined;
 }

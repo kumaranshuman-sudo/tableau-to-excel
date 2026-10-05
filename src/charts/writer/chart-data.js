@@ -16,11 +16,12 @@ export function writeChartData(ws, spec, startRow) {
   };
   ws.getCell(startRow + 1, 1).font = { bold: true };
 
-  if (spec.kind === "scatter") {
+  if (spec.kind === "scatter" || spec.kind === "bubble") {
+    const per = spec.kind === "bubble" ? 3 : 2;                 // x, y (, bubble size) columns per series
     let maxLen = 0;
     /** @type {ChartRefs["series"]} */
     const series = spec.series.map((s, k) => {
-      const cx = 2 * k, cy = 2 * k + 1, n = s.x.length;
+      const cx = per * k, cy = cx + 1, n = s.x.length;
       put(startRow, cx, (spec.xTitle || "X") + (spec.series.length > 1 ? " – " + s.name : ""));
       put(startRow, cy, s.name);
       for (let i = 0; i < n; i++) {
@@ -28,11 +29,19 @@ export function writeChartData(ws, spec, startRow) {
         if (num(s.y[i]) !== null) put(startRow + 1 + i, cy, s.y[i], spec.numFmt);
       }
       maxLen = Math.max(maxLen, n);
-      return { tx: cellRef(sheet, cy, startRow),
-               x: cellRef(sheet, cx, startRow + 1, cx, startRow + Math.max(1, n)),
-               y: cellRef(sheet, cy, startRow + 1, cy, startRow + Math.max(1, n)) };
+      /** @type {ChartRefs["series"][number]} */
+      const ref = { tx: cellRef(sheet, cy, startRow),
+                    x: cellRef(sheet, cx, startRow + 1, cx, startRow + Math.max(1, n)),
+                    y: cellRef(sheet, cy, startRow + 1, cy, startRow + Math.max(1, n)) };
+      if (per === 3) {
+        const cs = cx + 2;
+        put(startRow, cs, (spec.sizeTitle || "Size") + (spec.series.length > 1 ? " – " + s.name : ""));
+        s.size.forEach((v, i) => { if (num(v) !== null) put(startRow + 1 + i, cs, v, spec.sizeNumFmt); });
+        ref.size = cellRef(sheet, cs, startRow + 1, cs, startRow + Math.max(1, n));
+      }
+      return ref;
     });
-    const lblCol = 2 * spec.series.length;
+    const lblCol = per * spec.series.length;
     spec.series.forEach((s, k) => {
       if (!s.labelTexts) return;
       const c = lblCol + k;

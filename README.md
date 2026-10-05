@@ -21,6 +21,9 @@ dashboard and choose **Access Local Extensions → Export.trex** (or **Reload** 
 
 `npm run build` makes a one-off build.
 
+In the panel, **Load Workbook** reads the dashboard's `.twbx` (or `.twb`) for its formatting. Load the
+packaged `.twbx` to also export logos and other image objects: a `.twb` does not contain the image files.
+
 ## Tests
 
 ```bash

@@ -24,7 +24,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const savedFormat = tableau.extensions.settings.get("twbFormatModel");
       if (savedFileName && savedTitleMap) {
         const titleCount = Object.keys(JSON.parse(savedTitleMap)).length;
-        if (savedFormat) setFormatModelCache(JSON.parse(savedFormat));
+        if (savedFormat) setFormatModelCache(JSON.parse(savedFormat), savedFileName);
         ensureFormatModel().then(model => {
           if (model) {
             showWorkbookLabel(savedFileName, `${titleCount} titles, formatting for ${Object.keys(model.sheets || {}).length} sheets`, model);

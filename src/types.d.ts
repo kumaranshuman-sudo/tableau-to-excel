@@ -49,12 +49,43 @@ interface StyleRule {
   field?: string;
   scope?: string;
   dataClass?: string;
+  /** axis rules: "0" = primary, "1" = secondary axis of a dual axis */
+  axisClass?: string;
 }
 
 interface ParsedStyle {
   /** element name ("cell", "header", "mark", "axis" …) → its rules */
   rules: Record<string, StyleRule[]>;
   encodings: ColorEncoding[];
+  /** Edit Axis settings (encoding attr="space") */
+  spaces?: AxisSpace[];
+}
+
+/** Edit Axis: fixed range ("fixed" / "fixedmin" / "fixedmax"), tick spacing, include zero */
+interface AxisSpace {
+  field?: string;
+  scope?: string;
+  axisClass?: string;
+  rangeType?: string;
+  min?: number;
+  max?: number;
+  majorSpacing?: number;
+  /** "false" = the axis does not extend to zero */
+  domainExpand?: string;
+}
+
+/** Analytics → Reference Line */
+interface ReferenceLine {
+  formula: string;
+  /** automatic / value / computation / custom / none */
+  labelType: string;
+  /** custom label, with <Value> / <Computation> tokens */
+  label?: string;
+  scope?: string;
+  /** constant lines */
+  value?: number;
+  axis?: FieldRef;
+  field?: FieldRef;
 }
 
 /** A <encoding attr="color"> palette / interpolation definition. */
@@ -103,6 +134,7 @@ interface SheetModel {
   measureSorts?: { field: FieldRef; measure: FieldRef; direction: string }[];
   measureFilter?: string[];
   boxPlot?: boolean;
+  referenceLines?: ReferenceLine[];
   runningTotals?: FieldRef[];
 }
 
@@ -119,6 +151,16 @@ interface DashboardZone {
   w: number;
   h: number;
   runs?: TextRun[];
+  /** image zones: the file inside the .twbx; Fit Image; Center Image (undefined = on) */
+  param?: string;
+  scaled?: boolean;
+  centered?: boolean;
+  /** image / button zones: the URL it opens */
+  url?: string;
+  /** id of the layout container the zone sits in */
+  parent?: string;
+  /** Layout pane formatting: background and border (ARGB colours) */
+  style?: { bgColor?: string; borderColor?: string; borderStyle?: string; borderWidth?: number };
 }
 
 interface DashboardModel {
@@ -292,7 +334,7 @@ interface ChartContext {
   doughnut?: boolean;
 }
 
-type ChartKind = "bar" | "line" | "area" | "combo" | "pie" | "doughnut" | "scatter" | "treemap";
+type ChartKind = "bar" | "line" | "area" | "combo" | "pie" | "doughnut" | "scatter" | "bubble" | "treemap";
 
 interface ChartCategories {
   /** one name per category level, outer → inner */
@@ -306,9 +348,11 @@ interface ChartSeries {
   name: string;
   /** category charts: one value per category */
   values?: (number | null)[];
-  /** scatter only */
+  /** scatter / bubble only */
   x?: (number | null)[];
   y?: (number | null)[];
+  /** bubble only: bubble area */
+  size?: (number | null)[];
   color: string | null;
   /** per-point colours (colour = a category level or a measure) */
   pointColors?: (string | null)[];
@@ -326,6 +370,22 @@ interface ChartSeries {
   labelNumFmt?: string;
   /** scatter: "value from cells" label text per point */
   labelTexts?: string[];
+  /** a reference line drawn as a flat line series */
+  refLine?: RefLineStyle;
+}
+
+/** a reference line: its value, label (an Excel number format, so Excel prints "Average" / "Avg. $1.2M"), line style */
+interface RefLineStyle {
+  value: number;
+  /** null = no label */
+  labelFmt: string | null;
+  color: string;
+  alpha: number;
+  width: number;
+  dash: boolean;
+  /** line switched off in the workbook (the label may still show) */
+  hidden: boolean;
+  font: { color?: string; bold?: boolean };
 }
 
 /** A renderer-neutral Excel chart, produced by buildExcelChartSpecs() and drawn by ExcelChartWriter. */
@@ -346,6 +406,17 @@ interface ChartSpec {
   valueTitle?: string;
   secondaryNumFmt?: string;
   secondaryTitle?: string;
+  /** bubble size column (data sheet header / number format) */
+  sizeTitle?: string;
+  sizeNumFmt?: string;
+  /** maps and packed bubbles: no axes, plot area fills the chart */
+  axesHidden?: boolean;
+  /** symbol map: both axes on one scale, x shrunk by cos(latitude) so the geography keeps its shape */
+  aspect?: { xScale: number };
+  /** packed bubbles: extent of the packing in radius units (largest bubble radius = 1), centre cx / cy */
+  packed?: { w: number; h: number; cx: number; cy: number };
+  /** symbol map: diameter of the largest mark as a share of the plot's shorter side */
+  markRatio?: number;
   /** scatter x axis */
   xNumFmt?: string;
   xTitle?: string;
@@ -355,6 +426,28 @@ interface ChartSpec {
   /** false = let Excel auto-scale instead of starting the axis at zero */
   includeZero?: boolean;
   valueAxisHidden?: boolean;
+  /** the worksheet hides these axes / lines (Show Header off, Format → Lines) */
+  categoryAxisHidden?: boolean;
+  secondaryAxisHidden?: boolean;
+  xAxisHidden?: boolean;
+  /** scatter: grid lines along the x axis */
+  xGridlines?: boolean;
+  /** false = no axis ruler on the category axis */
+  axisLine?: boolean;
+  /** Format → Axis → Numbers: tick formats as set in the workbook (else derived from the value format) */
+  valueAxisNumFmt?: string;
+  secondaryAxisNumFmt?: string;
+  xAxisNumFmt?: string;
+  /** Edit Axis: tick spacing; scatter x axis range */
+  valueMajorUnit?: number;
+  xMajorUnit?: number;
+  xMin?: number;
+  xMax?: number;
+  /** the worksheet's mark label font (hex colour) and, for bars, Excel's label position */
+  labelFont?: { name?: string; size?: number; color?: string; bold?: boolean };
+  labelPos?: "inBase" | "ctr" | "inEnd" | "outEnd";
+  /** reference lines across horizontal bars (drawn as vertical lines over the bars) */
+  refLines?: RefLineStyle[];
   /** line chart drawn as a box plot: up/down bars + high-low lines */
   boxPlot?: { color: string };
   /** separate panes of one worksheet, stacked vertically */
@@ -371,7 +464,7 @@ interface ChartSpec {
 interface ChartRefs {
   /** category range (category charts) */
   cat?: string;
-  series: { tx: string; val?: string; x?: string; y?: string; lbl?: string }[];
+  series: { tx: string; val?: string; x?: string; y?: string; size?: string; lbl?: string }[];
   /** first free row on the data sheet after this chart */
   nextRow: number;
 }
@@ -395,8 +488,23 @@ interface ChartJob {
 
 /** One block laid out on the dashboard sheet: a worksheet (table, KPI card, chart or image) or a
  *  filter / parameter value list. */
+/** a picture packaged in the .twbx (Image/logo.png) */
+interface WorkbookImage {
+  data: Uint8Array;
+}
+
+/** a dashboard image object to draw: the file, its format / size, its zone and link */
+interface ImageBlock {
+  file: WorkbookImage;
+  info: import("./export/images.js").ImageInfo;
+  zone: DashboardZone;
+  url: string | null;
+  widthPx: number;
+  heightPx: number;
+}
+
 interface ExportItem {
-  type: "worksheet" | "filterValue";
+  type: "worksheet" | "filterValue" | "text" | "image";
   name: string;
   visualName: string;
   /** dashboard zone → grid position (export/layout.js) */
@@ -422,6 +530,14 @@ interface ExportItem {
   allocatedRows?: number;
   /** grouped tables: data rows kept visible – blocks beside the table use them (setTableVisibleRows) */
   visibleRows?: number;
+  /** dashboard text box (banner, title, note) drawn in its zone (export/kpi-card.js) */
+  textCard?: import("./export/kpi-card.js").KpiCard;
+  /** chart sharing a KPI card's columns (Tableau's number + trend tile) */
+  pairedCard?: boolean;
+  /** KPI tile rebuilt from its Tableau label (export/kpi-card.js); null = label | value table */
+  kpiCard?: import("./export/kpi-card.js").KpiCard | null;
+  /** dashboard image object (logo, icon) with its own zone */
+  image?: ImageBlock;
 }
 
 /* ── browser APIs the panel feature-detects (File System Access; Chromium only) ── */

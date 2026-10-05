@@ -3,18 +3,24 @@ import ExcelJS from "exceljs";
 import { buildExcelChartSpecs } from "../charts/model/index.js";
 import { FORMAT_CONFIG, TABLEAU_DEFAULTS, TF_ELEMENTS, VISUAL_TYPES } from "../config.js";
 import { writeDashboardTitle, writeIndividualFilterTable } from "./cell-writers.js";
-import { CHART_DATA_SHEET, EXCEL_ROW_PX, PX_PER_COL, PX_PER_ROW, ROW_GAP, buildLayoutMap, graphicBox, makeRangeTracker, resolveCollisions, setTableVisibleRows, tableDataStart, viewModelHeight } from "./layout.js";
+import { CHART_DATA_SHEET, EXCEL_ROW_PX, OBJECT_KIND, PX_PER_COL, PX_PER_ROW, ROW_GAP, buildLayoutMap, getExcelColumnName, graphicBox, makeRangeTracker, resolveCollisions, setTableVisibleRows, tableDataStart, viewModelHeight } from "./layout.js";
 import { extractFilterValuesPerField, fetchAllSheetsData, isFilterValueWorksheet } from "./sheet-data.js";
 import { applyAutoFilters, setColumnWidths, writeKPICardStacked, writeRegularTable, writeTableauTitle } from "./visual-writers.js";
+import { KPI_GUTTER, buildKpiCard, buildTextCard, writeKpiCard } from "./kpi-card.js";
+import { tfStrokeToBorder, tfZoneText } from "../twb/dashboard-text.js";
+import { tfExcelFill } from "../format/excel-style.js";
 import { tfDashboardTitleRuns } from "../twb/dashboard-text.js";
 import { tfCollect, tfMerge } from "../twb/formatter.js";
 import { appendExportStatus, setExportStatus, updateVisualStatus } from "../ui/status.js";
-import { chooseSaveTarget, ensureFormatModel, getTitleMap } from "../ui/workbook-store.js";
+import { chooseSaveTarget, ensureFormatModel, formatModelFileName, getTitleMap, getWorkbookImages } from "../ui/workbook-store.js";
+import { classifyImageObjects, fitImage, imageInfo, nativeAnchor, prepareImage, webLink } from "./images.js";
 import { isKPIViewModel } from "../visual/classify.js";
 import { renderTableauImage } from "../visual/image-renderer.js";
 import { VISUAL_RENDERERS, buildVisualModel, chooseVisualRenderer, imageOrFallback } from "../visual/visual-model.js";
 import { checkWorkbookMatch, describeWorkbookMatch } from "../visual/workbook-match.js";
 import { ExcelChartWriter } from "../charts/writer/index.js";
+import { fixSheetProperties } from "../charts/writer/package.js";
+import { exportFileName as makeExportFileName } from "../util.js";
 
 export async function exportToExcel() {
   const dashboard = tableau.extensions.dashboardContent.dashboard;
@@ -23,9 +29,6 @@ export async function exportToExcel() {
   btn.disabled = true;
 
   try {
-    const now = new Date();
-    const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}`;
-    const exportFileName = `${(dashboard.name || "Dashboard Export").replace(/[\\\/\*\?\[\]:]/g, "").slice(0, 31)}_${stamp}.xlsx`;
     if (!(await ensureFormatModel()) && !window.confirm(
         "No Tableau workbook is loaded for this dashboard.\n\n" +
         "Without it the extension cannot tell which sheets are charts, so they will be exported as tables.\n\n" +
@@ -33,6 +36,8 @@ export async function exportToExcel() {
       setExportStatus("Export stopped – click 📁 Load Workbook first so charts are exported as charts", true);
       return;
     }
+    // "<workbook> - <dashboard>.xlsx": the workbook the formatting comes from (remembered or loaded)
+    const exportFileName = makeExportFileName(formatModelFileName(), dashboard.name);
     setExportStatus("Choose where to save the Excel file…");
     const saveTarget = await chooseSaveTarget(exportFileName);       // opens in the loaded workbook's folder
     if (saveTarget === "cancelled") { setExportStatus("Export cancelled – no file was saved"); return; }
@@ -51,12 +56,13 @@ export async function exportToExcel() {
 
     const layoutMap = buildLayoutMap(dashboard.objects || [], titleMap);
 
-    // ── 1. Build DZV map ──
+    // ── 1. Build DZV map ── (a sheet squeezed into a 1 px zone is a common way to hide it: not shown either)
     const dzvMap = {};
     (dashboard.objects || [])
       .filter(obj => obj.type === "worksheet")
       .forEach(obj => {
-        dzvMap[obj.name] = obj.isVisible;
+        const tiny = obj.size && (obj.size.width < 8 || obj.size.height < 8);
+        dzvMap[obj.name] = obj.isVisible !== false && !tiny;
       });
     console.log("[DZV] Visibility map:", dzvMap);
 
@@ -141,6 +147,12 @@ export async function exportToExcel() {
         if (renderDecision.renderer === "excel-chart") {
           try {
             visualModel.chartSpecs = buildExcelChartSpecs(visualModel, fmtModel);
+            // Tableau draws legends as separate dashboard cards, never inside the view: the chart keeps a
+            // legend only when the dashboard shows a colour / size / shape legend for this sheet
+            const dashZones = fmtModel && fmtModel.dashboards && fmtModel.dashboards[dashboard.name] ? fmtModel.dashboards[dashboard.name].zones : null;
+            if (dashZones && !dashZones.some(z => /^(color|size|shape)$/.test(z.type) && z.name === sheet.name && !z.hidden)) {
+              visualModel.chartSpecs.forEach(s => { s.legend = false; });
+            }
           } catch (err) {
             console.warn(`[Visual] ${sheet.name}: native chart not possible – ${err.message}`);
             renderDecision = imageOrFallback(visualModel, `native chart not possible (${err.message})`);
@@ -193,18 +205,22 @@ export async function exportToExcel() {
         const isGraphic = visualModel.renderer === "excel-chart" || visualModel.renderer === "tableau-image";
         const box = isGraphic ? graphicBox(layout, vm) : null;
         const isKPI = !isGraphic && isKPIViewModel(vm);
+        // KPI tile: rebuilt from its Tableau label and filling its zone (null = drawn as a label | value table)
+        const kpiCard = isKPI ? buildKpiCard(vm, sheet.name, layout) : null;
+        const kpiW = kpiCard && layout && layout.widthPx ? Math.max(kpiCard.tiles.length, layout.gridRight - layout.gridCol) : null;
         dataWorksheetItems.push({
           name: sheet.name,
           visualName: vm.title.text,
           layout,
           isKPI,
+          kpiCard,
           type: "worksheet",
           vm,
           visualModel,
           box,                                                 // chart/image: pixel size from the dashboard zone
-          fixedGridW: box ? box.gridW : null,
+          fixedGridW: box ? box.gridW : kpiW,
           columns: vm.order,                                   // only its length is used for layout
-          rowCount: box ? box.rows : isKPI ? (vm.showTitle ? 1 : 0) + vm.order.length : viewModelHeight(vm)
+          rowCount: box ? box.rows : kpiCard ? kpiCard.rows : isKPI ? (vm.showTitle ? 1 : 0) + vm.order.length : viewModelHeight(vm)
         });
       }
     }
@@ -212,7 +228,7 @@ export async function exportToExcel() {
     // ── parameter controls (e.g. Start Date / End Date): not filters, so read them separately ──
     try {
       const params = typeof dashboard.getParametersAsync === "function" ? await dashboard.getParametersAsync() : [];
-      const controls = (dashboard.objects || []).filter(o => o.type === "parameter" && o.isVisible !== false);
+      const controls = (dashboard.objects || []).filter(o => OBJECT_KIND[o.type] === "parameter" && o.isVisible !== false);
       const used = new Set();
       const norm = s => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
       params.forEach(param => {
@@ -232,7 +248,64 @@ export async function exportToExcel() {
       console.warn("[Parameters] could not read parameters:", err.message);
     }
 
-    const allItems = [...filterValueItems, ...dataWorksheetItems];
+    // Tableau's number + trend tile: a chart in the zone right under / over a KPI card, same position and
+    // width, takes the card's columns so the two line up as one card
+    const near = (a, b) => Math.abs(a - b) <= 8;
+    dataWorksheetItems.filter(it => it.kpiCard && it.fixedGridW && it.layout).forEach(card => {
+      const c = card.layout;
+      dataWorksheetItems.forEach(other => {
+        const o = other.layout;
+        if (other === card || !other.box || !o || !o.widthPx || !near(o.xPx, c.xPx) || !near(o.widthPx, c.widthPx)) return;
+        if (near(o.yPx, c.yPx + c.heightPx) || near(c.yPx, o.yPx + o.heightPx)) { other.fixedGridW = card.fixedGridW; other.pairedCard = true; }
+      });
+    });
+
+    // ── dashboard text boxes (banners, titles, notes): drawn where Tableau puts them, as Tableau formats them
+    const dashZones = (fmtModel && fmtModel.dashboards && fmtModel.dashboards[dashboard.name] || { zones: [] }).zones;
+    const headerZoneIds = new Set(dataWorksheetItems.flatMap(it => it.vm ? it.vm.headerZoneIds : []));   // already table headers
+    /** @type {ExportItem[]} */
+    const textItems = [];
+    (dashboard.objects || []).filter(o => OBJECT_KIND[o.type] === "text" && o.isVisible !== false).forEach(o => {
+      const zone = dashZones.find(z => z.type === "text" && String(z.id) === String(o.id));
+      if (!zone || zone.hidden || headerZoneIds.has(zone.id)) return;
+      const layout = layoutMap.get(`text:${o.id}`);
+      const card = buildTextCard(zone, layout, fmtModel);
+      if (!card) return;
+      textItems.push({ type: "text", name: `text:${o.id}`, visualName: tfZoneText(zone), layout, textCard: card,
+        rowCount: card.rows, columns: [], fixedGridW: layout && layout.widthPx ? Math.max(1, layout.gridRight - layout.gridCol) : null });
+    });
+    if (textItems.length) console.log(`[Text] ${textItems.length} dashboard text box(es)`);
+
+    // ── dashboard images (logos, icons) from the files packaged in the .twbx: a logo in its own zone is
+    //    a block of the layout, an icon over a sheet floats on that sheet's block, backgrounds are left out
+    const imageKinds = classifyImageObjects(dashboard.objects || []);
+    const imageObjects = (dashboard.objects || []).filter(o => o.type === "image" && o.isVisible !== false && imageKinds.has(String(o.id)));
+    const workbookImages = imageObjects.length ? await getWorkbookImages() : {};
+    /** @type {ExportItem[]} */
+    const imageItems = [];
+    /** @type {(ImageBlock & { host: string, xPx: number, yPx: number })[]} */
+    const overlayImages = [];
+    imageObjects.forEach(o => {
+      const cls = imageKinds.get(String(o.id));
+      const zone = dashZones.find(z => z.type === "bitmap" && String(z.id) === String(o.id));
+      if (!zone || !zone.param || zone.hidden) return;
+      if (cls.kind === "backdrop" || cls.kind === "tiny") { console.log(`[Images] ${zone.param}: ${cls.kind === "tiny" ? "divider" : "background"} – not exported`); return; }
+      const file = workbookImages[zone.param];
+      if (!file) { console.warn(`[Images] ${zone.param} is not in the loaded workbook – load the .twbx to export it`); return; }
+      const info = imageInfo(file.data, zone.param);
+      if (!info.type) { console.warn(`[Images] ${zone.param}: not a PNG, JPEG, GIF or SVG file`); return; }
+      /** @type {ImageBlock} */
+      const image = { file, info, zone, url: webLink(zone.url), widthPx: o.size.width, heightPx: o.size.height };
+      if (cls.kind === "overlay") { overlayImages.push({ ...image, host: cls.host, xPx: o.position.x, yPx: o.position.y }); return; }
+      const layout = layoutMap.get(`image:${o.id}`);
+      if (!layout) return;
+      imageItems.push({ type: "image", name: `image:${o.id}`, visualName: zone.param, layout, image, columns: [],
+        rowCount: Math.max(1, Math.round(o.size.height / EXCEL_ROW_PX)),
+        fixedGridW: layout.widthPx ? Math.max(1, layout.gridRight - layout.gridCol) : null });
+    });
+    if (imageItems.length || overlayImages.length) console.log(`[Images] ${imageItems.length + overlayImages.length} image(s)`);
+
+    const allItems = [...filterValueItems, ...dataWorksheetItems, ...textItems, ...imageItems];
 
     if (allItems.length === 0) {
       throw new Error("No data found in any visible worksheet.");
@@ -320,7 +393,10 @@ setTableVisibleRows(placedItems);
       .replace(/[\\\/\*\?\[\]:]/g, "")
       .slice(0, 31);
     const worksheet = workbook.addWorksheet(sheetName);
+    // the sheet as the dashboard's canvas: no cell grid, as in Tableau
+    worksheet.views = [{ showGridLines: !!FORMAT_CONFIG.sheetGridlines }];
 
+    /** @type {Record<number, number>} */
     const colWidths = {};
     const exactWidths = {};
     const allTablesInfo = [];
@@ -338,7 +414,10 @@ setTableVisibleRows(placedItems);
     }
     const usedZones = new Set(dataWorksheetItems.flatMap(it => it.vm ? it.vm.headerZoneIds : []));
     const titleRuns = tfDashboardTitleRuns(fmtModel, dashboard.name, usedZones);
-    const titleHeight = writeDashboardTitle(worksheet, dashboardName, exportDate, currentRow, 0, tracker, dashTitleProps, titleRuns);
+    // Tableau shows the dashboard title only when its title zone is on (text boxes are drawn in place)
+    const titleShown = !dashFmt || dashFmt.zones.some(z => z.type === "title" && !z.hidden);
+    const titleHeight = writeDashboardTitle(worksheet, titleShown ? dashboardName : "", exportDate, currentRow, 0, tracker, dashTitleProps,
+      titleShown ? titleRuns : null);
     currentRow += titleHeight;
 
 
@@ -437,6 +516,13 @@ setTableVisibleRows(placedItems);
           item.isParameter ? "PARAMETER VALUE" : undefined
         );
         colWidths[item.gridCol] = Math.max(colWidths[item.gridCol] || 0, 35);
+      } else if (item.image) {
+        tracker.update(item.gridRow, item.gridCol);                 // the picture goes in once the columns are sized
+        tracker.update(item.gridRow + item.allocatedRows - 1, item.gridCol + item.gridW - 1);
+      } else if (item.textCard) {
+        writeKpiCard(worksheet, item.textCard, null, item.gridRow, item.gridCol, item.gridW, tracker, colWidths);
+      } else if (item.kpiCard) {
+        writeKpiCard(worksheet, item.kpiCard, item.vm, item.gridRow, item.gridCol, item.gridW, tracker, colWidths);
       } else if (item.isKPI) {
         writeKPICardStacked(worksheet, item.vm, item.gridRow, item.gridCol, tracker);
         colWidths[item.gridCol] = Math.max(colWidths[item.gridCol] || 0, 22);
@@ -448,28 +534,128 @@ setTableVisibleRows(placedItems);
 
     updateVisualStatus(visualStatuses, workbookWarning);
 
+    // a KPI card directly above / below a chart of the same width and colour (Tableau's number + trend
+    // tile): the layout gap between them gets the card colour too, so they read as one card
+    const sameColor = (a, b) => !!a && !!b && String(a).replace(/^#/, "").slice(-6).toUpperCase() === String(b).replace(/^#/, "").slice(-6).toUpperCase();
+    adjustedItems.filter(it => it.kpiCard && it.kpiCard.background).forEach(card => {
+      const color = card.kpiCard.background;
+      const cardEnd = card.gridRow + card.allocatedRows;
+      adjustedItems.forEach(other => {
+        if (other === card || other.gridCol !== card.gridCol || Math.abs(other.gridW - card.gridW) > 1) return;
+        const specs = other.visualModel && other.visualModel.renderer === "excel-chart" ? other.visualModel.chartSpecs : null;
+        if (!sameColor(specs && specs.length ? specs[0].background : null, color)) return;
+        const otherEnd = other.gridRow + other.allocatedRows;
+        const [from, to] = other.gridRow >= cardEnd ? [cardEnd, other.gridRow] : otherEnd <= card.gridRow ? [otherEnd, card.gridRow] : [0, 0];
+        if (to - from < 1 || to - from > 2) return;
+        for (let rr = from; rr < to; rr++) {
+          for (let c = card.gridCol; c < card.gridCol + card.gridW; c++) {
+            const cell = worksheet.getCell(rr + 1, c + 1);
+            cell.fill = tfExcelFill(color);
+            if (c === card.gridCol) cell.border = { left: KPI_GUTTER };
+            if (c === card.gridCol + card.gridW - 1) cell.border = { ...(cell.border || {}), right: KPI_GUTTER };
+          }
+        }
+      });
+    });
+
+    // bordered layout containers (Layout pane → Border, e.g. a card around a column of sheets): their
+    // outline around the blocks they hold
+    const zoneById = new Map(dashZones.map(z => [String(z.id), z]));
+    const within = (zoneId, containerId) => {
+      for (let z = zoneById.get(String(zoneId)); z && z.parent; z = zoneById.get(String(z.parent))) if (String(z.parent) === containerId) return true;
+      return false;
+    };
+    dashZones.filter(z => /^layout-/.test(z.type) && !z.hidden && z.style && z.style.borderStyle && z.style.borderStyle !== "none" &&
+                          (z.style.borderWidth || 0) > 0).forEach(container => {
+      const members = adjustedItems.filter(it => it.layout && it.layout.id !== undefined && within(it.layout.id, String(container.id)));
+      if (!members.length) return;
+      const top = Math.min(...members.map(m => m.gridRow)), left = Math.min(...members.map(m => m.gridCol));
+      const bottom = Math.max(...members.map(m => m.gridRow + m.allocatedRows)) - 1;
+      const right = Math.max(...members.map(m => m.gridCol + m.gridW)) - 1;
+      /** @type {Partial<import("exceljs").Border>} */
+      const side = { style: /** @type {import("exceljs").BorderStyle} */ (tfStrokeToBorder(container.style.borderWidth) || "thin"),
+                     color: { argb: container.style.borderColor || "FFD4D4D4" } };
+      const edge = (r, c, sides) => { const cell = worksheet.getCell(r + 1, c + 1); cell.border = { ...(cell.border || {}), ...sides }; };
+      for (let c = left; c <= right; c++) { edge(top, c, { top: side }); edge(bottom, c, { bottom: side }); }
+      for (let r = top; r <= bottom; r++) { edge(r, left, { left: side }); edge(r, right, { right: side }); }
+    });
+
     setColumnWidths(worksheet, colWidths, exactWidths);
     applyAutoFilters(worksheet, allTablesInfo);
+    if (FORMAT_CONFIG.printFitToWidth) {
+      // printing / Save as PDF: the whole dashboard, one page wide, oriented like the dashboard
+      const ext = (dashboard.objects || []).reduce((a, o) => o.position && o.size
+        ? { w: Math.max(a.w, o.position.x + o.size.width), h: Math.max(a.h, o.position.y + o.size.height) } : a, { w: 0, h: 0 });
+      const used = tracker.toRange();
+      worksheet.pageSetup = { ...worksheet.pageSetup, orientation: ext.w >= ext.h ? "landscape" : "portrait",
+        fitToPage: true, fitToWidth: 1, fitToHeight: 0, horizontalCentered: true,
+        margins: { left: 0.4, right: 0.4, top: 0.5, bottom: 0.5, header: 0.3, footer: 0.3 },
+        printArea: `A$1:${getExcelColumnName(used.e.c)}$${used.e.r + 1}` };          // ExcelJS adds the column's $
+    }
+
+    // final column widths / row heights in px: charts and pictures are fitted to their blocks with them
+    const colPx = ci => Math.floor((worksheet.getColumn(ci + 1).width || 8.43) * 7 + 5);
+    const rowPx = ri => {                            // collapsed rows take no space on screen
+      const row = worksheet.getRow(ri + 1);
+      if (row.hidden) return 0;
+      return row.height ? Math.round(row.height * 4 / 3) : EXCEL_ROW_PX;
+    };
+    const blockPx = it => {
+      let w = 0, h = 0;
+      for (let c = it.gridCol; c < it.gridCol + it.gridW; c++) w += colPx(c);
+      for (let r = it.gridRow; r < it.gridRow + it.allocatedRows; r++) h += rowPx(r);
+      return { w, h };
+    };
+    /* a picture at (x, y) px from the block's top-left cell, w × h px, linked like its zone */
+    const addPicture = async (image, col, row, x, y, w, h) => {
+      const pic = await prepareImage(image.file, image.info, w, h);
+      if (!pic) { console.warn(`[Images] ${image.zone.param}: cannot be drawn in this browser`); return false; }
+      const id = workbook.addImage({ base64: pic.base64, extension: pic.extension });
+      worksheet.addImage(id, /** @type {any} */ ({
+        tl: nativeAnchor(col, row, x, y, colPx, rowPx), ext: { width: w, height: h }, editAs: "oneCell",
+        ...(image.url ? { hyperlinks: { hyperlink: image.url, tooltip: image.url } } : {})
+      }));
+      return true;
+    };
+    let picturesAdded = 0;
+    for (const item of adjustedItems.filter(it => it.image)) {
+      const img = item.image, block = blockPx(item);
+      // Fit Image / Center Image inside the block, never larger than Tableau draws it in its zone
+      const fit = fitImage(img.info.width, img.info.height, block.w, block.h, img.zone.scaled, img.zone.centered);
+      const cap = fitImage(img.info.width, img.info.height, img.widthPx, img.heightPx, img.zone.scaled, img.zone.centered);
+      const w = Math.min(fit.w, cap.w), h = Math.min(fit.h, cap.h);
+      const centered = img.zone.centered !== false;
+      const x = centered ? Math.round((block.w - w) / 2) : 0, y = centered ? Math.round((block.h - h) / 2) : 0;
+      if (await addPicture(img, item.gridCol, item.gridRow, x, y, w, h)) picturesAdded++;
+    }
+    for (const img of overlayImages) {
+      // an icon over a sheet: the same spot of that sheet's block, scaled with the block
+      const host = adjustedItems.find(it => it.layout && String(it.layout.id) === img.host);
+      if (!host || !host.layout.widthPx || !host.layout.heightPx) continue;
+      const block = blockPx(host);
+      const sx = block.w / host.layout.widthPx, sy = block.h / host.layout.heightPx, k = Math.max(0.5, Math.min(1.5, sx, sy));
+      const fit = fitImage(img.info.width, img.info.height, img.widthPx * k, img.heightPx * k, img.zone.scaled, img.zone.centered);
+      if (await addPicture(img, host.gridCol, host.gridRow, Math.round((img.xPx - host.layout.xPx) * sx) + fit.x,
+                           Math.round((img.yPx - host.layout.yPx) * sy) + fit.y, fit.w, fit.h)) picturesAdded++;
+    }
+    if (picturesAdded) console.log(`[Images] ${picturesAdded} picture(s) added`);
 
     setExportStatus("Building the Excel file…");
     /** @type {any} the XLSX bytes: ExcelJS's buffer, then injectCharts' Uint8Array */
     let buffer = await workbook.xlsx.writeBuffer();
+    // fit-to-page next to collapsed row groups: ExcelJS writes <sheetPr> out of order – put it right
+    if (worksheet.pageSetup.fitToPage && worksheet.properties.outlineProperties) buffer = await fixSheetProperties(buffer);
     if (chartJobs.length) {
       // fit every chart to its own block now that the final column widths/row heights are known:
       // tables widen the columns, so a chart kept at its Tableau pixel size would end short of the
       // tables / charts aligned with it on the dashboard → stretch it to the block's edges
-      const colPx = ci => Math.floor((worksheet.getColumn(ci + 1).width || 8.43) * 7 + 5);
-      const rowPx = ri => {                          // collapsed rows take no space on screen
-        const row = worksheet.getRow(ri + 1);
-        if (row.hidden) return 0;
-        return row.height ? Math.round(row.height * 4 / 3) : EXCEL_ROW_PX;
-      };
       chartJobs.forEach(job => {
         let w = 0, h = -job.rowOffPx;
         for (let c = job.item.gridCol; c < job.item.gridCol + job.item.gridW; c++) w += colPx(c);
         for (let r = job.row; r < job.item.gridRow + job.item.allocatedRows; r++) h += rowPx(r);
         const panes = job.item.visualModel.chartSpecs.length;     // stacked panes share the block height
         job.widthPx = Math.max(160, w);
+        if (job.item.pairedCard) { job.colOffPx = 2; job.widthPx = Math.max(160, w - 4); }     // the card's white edges
         job.heightPx = Math.max(60, panes > 1 ? Math.min(job.heightPx, h) : h);
       });
       try {

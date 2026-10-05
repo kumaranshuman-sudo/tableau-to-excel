@@ -127,6 +127,61 @@ export async function restoreWorkbookHandle() {
 }
 
 /* =============================================================================
+ * Packaged images – the files the dashboards' image objects show (logos, icons). Read from the .twbx
+ * on load and kept in IndexedDB under their own key, so a remembered workbook still exports them.
+ * ============================================================================= */
+/** @type {{ file: string | null, images: Record<string, WorkbookImage> } | null} */
+let IMAGE_CACHE = null;
+
+/** "Image/logo.png" → its bytes, for every image zone of the workbook's dashboards found in the archive
+ * @param {JSZip} zip @param {FormatModel} model @returns {Promise<Record<string, WorkbookImage>>} */
+export async function extractWorkbookImages(zip, model) {
+  const wanted = new Set();
+  Object.values(model.dashboards || {}).forEach(d => (d.zones || []).forEach(z => { if (z.type === "bitmap" && z.param) wanted.add(z.param); }));
+  const files = Object.values(zip.files).filter(f => !f.dir);
+  const norm = p => String(p).replace(/\\/g, "/").toLowerCase();
+  const base = p => norm(p).split("/").pop();
+  /** @type {Record<string, WorkbookImage>} */
+  const images = {};
+  for (const path of wanted) {
+    // packaged as written in the zone ("Image/x.png"); a zone that points at the author's disk matches by file name
+    const f = files.find(x => norm(x.name) === norm(path)) || files.find(x => base(x.name) === base(path));
+    if (f) images[path] = { data: await f.async("uint8array") };
+  }
+  return images;
+}
+
+export async function storeWorkbookImages(fileName, images) {
+  try {
+    const db = await openHandleDb();
+    db.transaction(HANDLE_STORE, "readwrite").objectStore(HANDLE_STORE)
+      .put({ fileName, images, savedAt: Date.now() }, "images:" + String(fileName).toLowerCase());
+  } catch (e) {
+    console.warn("[Workbook] could not keep the workbook images in browser storage:", e.message);
+  }
+}
+
+/** the packaged images of the workbook the formatting comes from ({} for a .twb or none)
+ * @returns {Promise<Record<string, WorkbookImage>>} */
+export async function getWorkbookImages() {
+  if (IMAGE_CACHE && IMAGE_CACHE.file === FORMAT_MODEL_FILE) return IMAGE_CACHE.images;
+  if (!FORMAT_MODEL_FILE || typeof indexedDB === "undefined") return {};
+  try {
+    const db = await openHandleDb();
+    /** @type {any} */
+    const rec = await new Promise(resolve => {
+      const req = db.transaction(HANDLE_STORE).objectStore(HANDLE_STORE).get("images:" + FORMAT_MODEL_FILE.toLowerCase());
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => resolve(null);
+    });
+    IMAGE_CACHE = { file: FORMAT_MODEL_FILE, images: (rec && rec.images) || {} };
+    return IMAGE_CACHE.images;
+  } catch (e) {
+    return {};
+  }
+}
+
+/* =============================================================================
  * loadWorkbookFile() - Loads .twb/.twbx and parses BOTH titles AND colors
  * ============================================================================= */
 export async function loadWorkbookFile() {
@@ -180,6 +235,7 @@ export async function readWorkbookFile(file) {
 
   try {
     let xmlString;
+    let zip = null;
     const ext = file.name.split(".").pop().toLowerCase();
 
     if (ext === "twb") {
@@ -197,7 +253,7 @@ export async function readWorkbookFile(file) {
         reader.readAsArrayBuffer(file);
       });
 
-      const zip = await JSZip.loadAsync(arrayBuffer);
+      zip = await JSZip.loadAsync(arrayBuffer);
       const twbEntry = Object.values(zip.files).find(
         f => !f.dir && /\.twb$/i.test(f.name)
       );
@@ -218,7 +274,12 @@ export async function readWorkbookFile(file) {
     // ── NEW: one DOM-based pass extracts all formatting (fonts, colours, number formats…)
     const formatModel = parseTableauFormatting(xmlString);
     FORMAT_MODEL_CACHE = formatModel;
+    FORMAT_MODEL_FILE = file.name;
     await storeFormatModel(file.name, formatModel, titleMap);
+    // logos / icons: only a .twbx carries the image files
+    const images = zip ? await extractWorkbookImages(zip, formatModel) : {};
+    IMAGE_CACHE = { file: file.name, images };
+    if (Object.keys(images).length) await storeWorkbookImages(file.name, images);
     tableau.extensions.settings.set("twbTitleMap", JSON.stringify(titleMap));
     try {
       tableau.extensions.settings.set("twbFormatModel", JSON.stringify(formatModel));
@@ -235,7 +296,9 @@ export async function readWorkbookFile(file) {
 
     const sheetCount = Object.keys(formatModel.sheets).length;
     const colorCount = Object.values(formatModel.sheets).filter(s => s.panes.some(p => p.encodings.some(e => e.channel === "color"))).length;
-    showWorkbookLabel(file.name, `${Object.keys(titleMap).length} titles, formatting for ${sheetCount} sheets (${colorCount} with colour)`, formatModel);
+    const imageCount = Object.keys(images).length;
+    showWorkbookLabel(file.name, `${Object.keys(titleMap).length} titles, formatting for ${sheetCount} sheets (${colorCount} with colour)` +
+      (imageCount ? `, ${imageCount} image${imageCount > 1 ? "s" : ""}` : ""), formatModel);
 
     return titleMap;
 
@@ -291,11 +354,18 @@ export function getTitleMap() {
  * ============================================================================= */
 export let FORMAT_MODEL_CACHE = null;
 
+/* the .twb / .twbx FORMAT_MODEL_CACHE was read from – the export's default file name starts with it */
+let FORMAT_MODEL_FILE = null;
+
+/** @returns {string | null} */
+export function formatModelFileName() { return FORMAT_MODEL_FILE; }
+
 export function getFormatModel() {
   if (FORMAT_MODEL_CACHE) return FORMAT_MODEL_CACHE;
   try {
     const saved = tableau.extensions.settings.get("twbFormatModel");
     FORMAT_MODEL_CACHE = saved ? JSON.parse(saved) : null;
+    if (FORMAT_MODEL_CACHE) FORMAT_MODEL_FILE = tableau.extensions.settings.get("twbFileName") || null;
   } catch (err) {
     console.warn("[getFormatModel] Could not read settings:", err.message);
   }
@@ -320,6 +390,7 @@ export async function ensureFormatModel() {
   saved.forEach(rec => { const r = rank(rec.model); if (r > bestRank) { best = rec; bestRank = r; } });
   if (best) {
     FORMAT_MODEL_CACHE = best.model;
+    FORMAT_MODEL_FILE = best.fileName;
     RESTORED_TITLE_MAP = best.titleMap || null;
     RESTORED_FILE_NAME = best.fileName;
     console.log(`[Workbook] using remembered workbook ${best.fileName} for this dashboard`);
@@ -328,6 +399,7 @@ export async function ensureFormatModel() {
 }
 
 /* main.js restores the cached model from the extension settings at start-up */
-export function setFormatModelCache(model) {
+export function setFormatModelCache(model, fileName) {
   FORMAT_MODEL_CACHE = model;
+  FORMAT_MODEL_FILE = fileName || null;
 }

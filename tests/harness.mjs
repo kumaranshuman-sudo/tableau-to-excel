@@ -35,8 +35,8 @@ const EXPECTED = {
   "Histogram": ["HISTOGRAM", "excel-chart", "bar"],
   "Gantt Chart": ["GANTT", "excel-chart", "bar"],
   "Treemap": ["TREEMAP", "excel-chart", "treemap"],
-  "Packed Bubbles": ["BUBBLE", "tableau-image", "img:circle"],
-  "Symbol Map": ["MAP", "tableau-image", "img:circle"],
+  "Packed Bubbles": ["BUBBLE", "excel-chart", "bubble"],
+  "Symbol Map": ["MAP", "excel-chart", "bubble"],
   "Filled Map": ["MAP_FILLED", "data-fallback", ""],
   "Waterfall": ["WATERFALL", "excel-chart", "bar"],
   "Box Plot": ["BOXPLOT", "excel-chart", "line"],
@@ -240,6 +240,168 @@ if (mode === "json") {
   X.setTableVisibleRows([table, chart]);
   layoutOk.push(check(table.visibleRows === 18, `a table beside a chart keeps its rows visible (got ${table.visibleRows})`));
   print(`layout: ${layoutOk.filter(Boolean).length}/${layoutOk.length} checks passed`);
+
+  // default export file name: "<workbook> - <dashboard>.xlsx"
+  const names = [
+    [["Superstore.twbx", "Executive Overview"], "Superstore - Executive Overview.xlsx"],
+    [["Retail Dashboard (1).twb", "Store Performance"], "Retail Dashboard (1) - Store Performance.xlsx"],
+    [[null, "Executive Overview"], "Executive Overview.xlsx"],                       // no workbook loaded
+    [["Sales.twbx", "Sales"], "Sales.xlsx"],                                          // same name once
+    [["Q1/Q2.twbx", "Profit: West?"], "Q1Q2 - Profit West.xlsx"]                      // characters Windows forbids
+  ];
+  const nameFails = names.filter(([args, want]) => X.exportFileName(...args) !== want);
+  nameFails.forEach(([args, want]) => failures.push(`file name: ${JSON.stringify(args)} → ${X.exportFileName(...args)}, expected ${want}`));
+  print(`file name: ${names.length - nameFails.length}/${names.length} checks passed`);
+
+  // a small workbook: a KPI tile with a custom label (value over caption, green background) and a
+  // trend sheet whose axes / grid lines are switched off – the export must follow both
+  const twb = `<?xml version='1.0' encoding='utf-8' ?><workbook><datasources/><worksheets>
+    <worksheet name='KPI'><table><view/><style><style-rule element='table'><format attr='background-color' value='#e6f1e2'/></style-rule></style>
+      <panes><pane><mark class='Automatic'/><encodings><text column='[ds].[sum:Sales:qk]'/></encodings>
+        <customized-label><formatted-text><run bold='true' fontsize='15'>&lt;[ds].[sum:Sales:qk]&gt;</run><run>\u00C6&#10;</run><run fontsize='11'>Total Sales</run></formatted-text></customized-label>
+      </pane></panes><rows/><cols/></table></worksheet>
+    <worksheet name='Trend'><table><view/><style>
+        <style-rule element='axis'><format attr='display' class='0' field='[ds].[sum:Sales:qk]' scope='rows' value='false'/><format attr='title' class='1' field='[ds].[sum:Sales:qk]' scope='rows' value=''/></style-rule>
+        <style-rule element='gridline'><format attr='stroke-size' value='0'/></style-rule></style>
+      <panes><pane><mark class='Line'/></pane></panes><rows>[ds].[sum:Sales:qk]</rows><cols>[ds].[mn:Order Date:ok]</cols></table></worksheet>
+  </worksheets><dashboards/></workbook>`;
+  const kpiModel = X.parseTableauFormatting(twb);
+  const sales = X.tfParseFieldRef("[ds].[sum:Sales:qk]");
+  const trendFmt = X.createSheetFormatter(kpiModel, "Trend");
+  const fidelity = [
+    check(trendFmt.axisInfo(sales, "rows", "0").hidden === true, "axis hidden on the primary axis (Show Header off)"),
+    check(trendFmt.axisInfo(sales, "rows", "1").hidden === undefined && trendFmt.axisInfo(sales, "rows", "1").title === "",
+      "secondary-axis rules stay on the secondary axis (title removed there only)"),
+    check(trendFmt.gridlinesShown("rows") === false, "grid lines switched off in the worksheet")
+  ];
+  const kpiVm = X.buildViewModel(kpiModel, "KPI", { columns: [{ fieldName: "SUM(Sales)", dataType: "float" }],
+    data: [[{ value: 2412000, nativeValue: 2412000, formattedValue: "$2.4M" }]] }, {});
+  const card = X.buildKpiCard(kpiVm, "KPI", { widthPx: 238, heightPx: 70 });
+  const lines = card ? card.tiles[0].lines : [];
+  fidelity.push(
+    check(!!card && card.tiles.length === 1 && lines.length === 2, `KPI card: one tile, two lines from the custom label (got ${card ? card.tiles.length + " / " + lines.length : "none"})`),
+    check(lines[0] && lines[0].segments[0].ci === 0 && lines[0].sizePt === 15 && lines[0].segments[0].props.bold === true, "KPI card: the value line keeps the label's 15pt bold"),
+    check(lines[1] && lines[1].segments[0].text === "Total Sales" && lines[1].sizePt === 11, "KPI card: the caption line keeps its text and 11pt"),
+    check(!!card && card.background === "FFE6F1E2", `KPI card: the worksheet background becomes the card colour (got ${card && card.background})`)
+  );
+  // dashboard text boxes: banner colour and fonts kept, field tokens split over runs still resolve
+  const banner = X.buildTextCard({ runs: [{ text: "SALES", props: { fontName: "Poppins SemiBold", fontSize: 16, color: "FFFFFFFF", hAlign: "center" } }],
+    style: { bgColor: "FF295D79" } }, { widthPx: 338, heightPx: 67 }, null);
+  const split = X.buildTextCard({ runs: ["<", "[Parameters].[Parameter 10]", "> Stores by <", "[Parameters].[Parameter 8]", ">"]
+    .map(text => ({ text, props: { bold: true, fontSize: 12 } })) }, { heightPx: 30 },
+    { fields: { "Parameters|parameter 10": { value: '"Top"' }, "Parameters|parameter 8": { alias: "Sales" } } });
+  fidelity.push(
+    check(!!banner && banner.background === "FF295D79" && banner.tiles[0].lines[0].hAlign === "center" && banner.tiles[0].lines[0].sizePt === 16,
+      "text box: background, alignment and font size from the workbook"),
+    check(!!split && split.tiles[0].lines[0].segments.map(s => s.text).join("") === "Top Stores by Sales",
+      `text box: parameter tokens split over runs resolve (got ${split && JSON.stringify(split.tiles[0].lines[0].segments.map(s => s.text).join(""))})`)
+  );
+  const nav = X.buildTextCard({ runs: [{ text: "Navigation", props: {} }, { text: "Æ ", props: {} }, { text: "Menu", props: {} }] }, null, null);
+  fidelity.push(check(!!nav && nav.tiles[0].lines.length === 2, "text box: the line-break mark followed by a space still breaks the line"));
+  // Tableau's DashboardObject types: quick filters, parameter controls and text boxes are laid out
+  const apiMap = X.buildLayoutMap([
+    { id: 1, type: "worksheet", name: "Sheet", position: { x: 0, y: 100 }, size: { width: 400, height: 300 } },
+    { id: 2, type: "quick-filter", name: "Region", position: { x: 420, y: 100 }, size: { width: 160, height: 80 } },
+    { id: 3, type: "parameter-control", name: "Start Date", position: { x: 420, y: 200 }, size: { width: 160, height: 60 } },
+    { id: 24, type: "text", name: "Text", position: { x: 0, y: 0 }, size: { width: 580, height: 60 } }
+  ]);
+  fidelity.push(check(apiMap.has("Region") && apiMap.get("Region").type === "filter" && apiMap.get("Start Date").type === "parameter" &&
+    apiMap.has("text:24") && apiMap.get("text:24").id === 24, "layout: quick-filter / parameter-control / text objects from the Extensions API"));
+  print(`fidelity: ${fidelity.filter(Boolean).length}/${fidelity.length} checks passed`);
+
+  // chart settings from the workbook, as on a KPI dashboard: a trend with month initials, tick spacing and
+  // an average line; bars labelled inside in the marks card's white font with text around the value
+  const chartTwb = `<?xml version='1.0' encoding='utf-8' ?><workbook><datasources/><worksheets>
+    <worksheet name='Trend'><table><view/><style>
+        <style-rule element='axis'><encoding attr='space' class='0' field='[ds].[sum:Sales:qk]' field-type='quantitative' major-spacing='50000.0' scope='rows' type='space'/></style-rule>
+        <style-rule element='label'><format attr='text-format' field='[ds].[mn:Order Date:ok]' value='iLLLLL'/><format attr='text-format' field='[ds].[sum:Sales:qk]' value='p0%'/></style-rule></style>
+      <panes><pane><mark class='Line'/><reference-line axis-column='[ds].[sum:Sales:qk]' formula='average' id='refline0' label-type='automatic' scope='per-table' value-column='[ds].[sum:Sales:qk]'/></pane></panes>
+      <rows>[ds].[sum:Sales:qk]</rows><cols>[ds].[mn:Order Date:ok]</cols></table></worksheet>
+    <worksheet name='By Region'><table><view/><style/>
+      <panes><pane><mark class='Bar'/><reference-line axis-column='[ds].[sum:Days:qk]' formula='average' id='refline0' label-type='automatic' scope='per-table' value-column='[ds].[sum:Days:qk]'/>
+        <customized-label><formatted-text><run>&lt;</run><run>[ds].[sum:Days:qk]</run><run>&gt; DAYS</run></formatted-text></customized-label>
+        <style><style-rule element='cell'><format attr='text-align' value='left'/></style-rule>
+          <style-rule element='datalabel'><format attr='color-mode' value='user'/><format attr='color' value='#ffffff'/><format attr='font-family' value='Poppins SemiBold'/></style-rule>
+          <style-rule element='mark'><format attr='mark-labels-show' value='true'/></style-rule></style>
+      </pane></panes><rows>[ds].[none:Region:nk]</rows><cols>[ds].[sum:Days:qk]</cols></table></worksheet>
+  </worksheets><dashboards/></workbook>`;
+  const chartModel = X.parseTableauFormatting(chartTwb);
+  const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+  const monthly = [43971, 20301, 58872, 36522, 44261, 52982, 45264, 63121, 87867, 77777, 118448, 96182];
+  const specsOf = (sheet, cols, rows) => {
+    const visual = X.buildVisualModel(chartModel, sheet, { columns: cols.map((c, i) => ({ fieldName: c[0], dataType: c[1], index: i })), data: rows },
+      { dashboardName: "", displayName: sheet });
+    return X.chooseVisualRenderer(visual).renderer === "excel-chart" ? X.buildExcelChartSpecs(visual, chartModel) : [];
+  };
+  const [trend] = specsOf("Trend", [["MONTH(Order Date)", "string"], ["SUM(Sales)", "float"]], MONTHS.map((m, i) => [dv(m), dv(monthly[i])]));
+  const [bars] = specsOf("By Region", [["Region", "string"], ["SUM(Days)", "float"]],
+    [["East", 4.0], ["Central", 3.9], ["South", 3.9], ["West", 3.8]].map(r => [dv(r[0]), dv(r[1])]));
+  // chart part XML without the data sheet: references to cells that are not written
+  const partXml = (spec, size) => X.chartXml(spec, { cat: "'Chart Data'!$A$2:$A$13", series: spec.series.map(() => ({ tx: "'Chart Data'!$B$1", val: "'Chart Data'!$B$2:$B$13" })), nextRow: 0 }, size);
+  const avgLine = trend && trend.series.find(s => s.refLine);
+  const trendXml = trend ? partXml(trend, { widthPx: 338, heightPx: 250 }) : "";
+  const range = trend ? X.valueRange(trend, { w: 287, h: 180 }) : null;
+  const charts = [
+    check(!!trend && trend.categories.levels[0].join("") === "JFMAMJJASOND", `month initials from the header's date format (got ${trend && trend.categories.levels[0].join(" ")})`),
+    check(!!trend && trend.valueMajorUnit === 50000 && /<c:majorUnit val="50000"\/>/.test(trendXml), "the workbook's tick spacing on the value axis"),
+    check(!!range && range.fixed.min === 0 && range.fixed.max > 118448 && range.fixed.max < 130000 && range.unit === 50000,
+      `the axis ends just past the data, not at an empty tick (got ${range && JSON.stringify(range)})`),
+    check(!!trend && trend.valueAxisNumFmt === "0%", `the axis's own tick format (got ${trend && trend.valueAxisNumFmt})`),
+    check(!!avgLine && Math.abs(avgLine.values[0] - monthly.reduce((a, b) => a + b) / 12) < 1e-6 && avgLine.refLine.labelFmt === '"Average"' &&
+      /<c:dLbl><c:idx val="1"\/><c:numFmt formatCode="&quot;Average&quot;"/.test(trendXml), "the average line, labelled \"Average\" over the second point"),
+    check(!!bars && !!bars.labelFont && bars.labelFont.color === "FFFFFF" && bars.labelFont.name === "Poppins SemiBold" && bars.labelPos === "inBase",
+      `bar labels in the marks card's font, inside the bars at the left (got ${bars && JSON.stringify(bars.labelFont)} ${bars && bars.labelPos})`),
+    check(!!bars && bars.series.filter(s => !s.refLine).every(s => /" DAYS"$/.test(s.labelNumFmt || "")),
+      `label text around the value as literal text (got ${bars && bars.series[0].labelNumFmt})`),
+    check(!!bars && (bars.refLines || []).length === 1 && /<c:scatterChart>/.test(partXml(bars, { widthPx: 338, heightPx: 241 })),
+      "an average line across horizontal bars (an XY line over the bars)"),
+    check((r => r.unit > 0 && r.fixed.min % r.unit === 0 && r.fixed.min <= -1396.17 && r.fixed.min > -1396.17 - r.unit && r.fixed.max === 761.1)(
+      X.valueRange({ series: [{ values: [100, 400] }], kind: "line", valueMin: -1396.17, valueMax: 761.1 }, { w: 300, h: 200 })),
+      "a fixed axis range starts at the round tick below its minimum, so the labels are round numbers"),
+    check(X.tableauToExcelNumFmt("p0%") === "0%" && X.tfWrapNumFmt("#,##0.0;-#,##0.0", "", " DAYS") === '#,##0.0" DAYS";-#,##0.0" DAYS"',
+      "short percent formats and label text in number formats"),
+    check(X.tfFormatDateLabel("iLLLLL", "March") === "M" && X.tfFormatDateLabel("MMM yy", "", { value: "2024-03-05" }) === "Mar 24" &&
+      X.tfFormatDateLabel("yyyy", "Q1") === null, "Tableau date label formats")
+  ];
+  print(`chart settings: ${charts.filter(Boolean).length}/${charts.length} checks passed`);
+
+  // dashboard images: format and size from the file header, backgrounds / dividers / overlays told apart,
+  // Fit Image keeping proportions, links that Excel opens
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 0, 0, 1, 44, 0, 0, 0, 100, 8, 6, 0, 0, 0]);
+  const gif = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 64, 0, 32, 0, 0, 0]);
+  const jpg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 4, 0, 0, 0xff, 0xc0, 0, 17, 8, 0, 48, 0, 96, 3, 0, 0]);
+  const svg = new TextEncoder().encode(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 40"><rect/></svg>`);
+  const info = [X.imageInfo(png), X.imageInfo(gif), X.imageInfo(jpg), X.imageInfo(svg, "logo.svg")];
+  const objs = [
+    { id: 1, type: "image", position: { x: 0, y: 0 }, size: { width: 1200, height: 800 } },          // background
+    { id: 2, type: "image", position: { x: 20, y: 10 }, size: { width: 130, height: 40 } },          // logo
+    { id: 3, type: "image", position: { x: 160, y: 10 }, size: { width: 3, height: 40 } },           // divider
+    { id: 4, type: "image", position: { x: 420, y: 140 }, size: { width: 40, height: 40 } },         // icon on a sheet
+    { id: 10, type: "worksheet", name: "KPI", position: { x: 400, y: 120 }, size: { width: 300, height: 200 } },
+    { id: 11, type: "text", name: "Text", position: { x: 170, y: 10 }, size: { width: 600, height: 40 } }
+  ];
+  const kinds = X.classifyImageObjects(objs);
+  const imgMap = X.buildLayoutMap(objs);
+  const fit = X.fitImage(200, 100, 100, 100, true);
+  const pic = await X.prepareImage({ data: png }, info[0], 30, 10);
+  const imageChecks = [
+    check(info[0].type === "png" && info[0].width === 300 && info[0].height === 100 && info[1].type === "gif" && info[1].width === 64 &&
+      info[2].type === "jpeg" && info[2].width === 96 && info[2].height === 48 && info[3].type === "svg" && info[3].width === 120,
+      `image format and size from the file header (got ${JSON.stringify(info)})`),
+    check(kinds.get("1").kind === "backdrop" && kinds.get("2").kind === "block" && kinds.get("3").kind === "tiny" &&
+      kinds.get("4").kind === "overlay" && kinds.get("4").host === "10", `backgrounds, logos, dividers and icons on sheets (got ${JSON.stringify([...kinds])})`),
+    check(imgMap.has("image:2") && !imgMap.has("image:1") && !imgMap.has("image:4") && imgMap.get("KPI").gridCol === Math.round((400 - 20) / X.PX_PER_COL),
+      "only logos take part in the layout; a background does not shift the grid"),
+    check(fit.w === 100 && fit.h === 50 && fit.x === 0 && fit.y === 25, `Fit Image keeps the proportions, centred (got ${JSON.stringify(fit)})`),
+    check(X.webLink("www.linkedin.com/in/x") === "https://www.linkedin.com/in/x" && X.webLink("javascript:alert(1)") === null, "image links Excel can open"),
+    check(JSON.stringify(X.nativeAnchor(0, 0, 100, 30, () => 64, () => 20)) === JSON.stringify({ nativeCol: 1, nativeColOff: 36 * 9525, nativeRow: 1, nativeRowOff: 10 * 9525 }),
+      "picture anchors in cells + EMU offsets"),
+    check(!!pic && pic.extension === "png" && pic.base64 === Buffer.from(png).toString("base64"), "a PNG goes in as packaged when there is no canvas"),
+    // print setup next to collapsed row groups: Excel refuses <sheetPr> children out of schema order
+    check(X.orderSheetPr('<sheetPr><pageSetUpPr fitToPage="1"/><outlinePr summaryBelow="0"/></sheetPr>') ===
+      '<sheetPr><outlinePr summaryBelow="0"/><pageSetUpPr fitToPage="1"/></sheetPr>', "sheet properties in the order Excel requires")
+  ];
+  print(`images: ${imageChecks.filter(Boolean).length}/${imageChecks.length} checks passed`);
   if (failures.length) {
     console.error(`\n${failures.length} check(s) failed:\n  ` + failures.join("\n  "));
     process.exitCode = 1;

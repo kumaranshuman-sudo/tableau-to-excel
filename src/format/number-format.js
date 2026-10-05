@@ -1,14 +1,15 @@
 /* Tableau number formats → Excel number formats. */
 
 /* Tableau text-format → Excel numFmt.
- * - strips Tableau's type prefix (n/c/p/e/*); locale "standard" codes (C1033…) → null (inferred instead)
+ * - strips Tableau's type prefix (n/c/p/e/*); locale "standard" codes (C1033…) → null (inferred instead),
+ *   while short ones are formats ("p0%" = whole percent)
  * - moves thousands-scaling commas behind the decimals: "#,##0,.0K" → "#,##0.0,\"K\""
  * - quotes every literal letter (Excel rejects bare K, M, yrs …)
  * - validates the result; anything doubtful → null so we never write an invalid format */
 export function tableauToExcelNumFmt(raw) {
   if (!raw) return null;
   let s = String(raw);
-  if (/^[A-Za-z]\d*%?$/.test(s)) return null;
+  if (/^[A-Za-z]\d{3,}%?$/.test(s)) return null;
   if (/^[ncpes*]/i.test(s) && !/^[#0]/.test(s)) s = s.slice(1);
   const sections = tfSplitSections(s);
   if (!sections || sections.length > 4) return null;
@@ -16,6 +17,13 @@ export function tableauToExcelNumFmt(raw) {
   if (out.some(x => x === null)) return null;
   const res = out.join(";");
   return /[0#]/.test(res) ? res : null;
+}
+
+/** an Excel number format with literal text around the number in every section ("4.0" → "4.0 DAYS")
+ * @param {string} fmt @param {string} prefix @param {string} suffix @returns {string} */
+export function tfWrapNumFmt(fmt, prefix, suffix) {
+  const q = s => s ? `"${s.replace(/"/g, "")}"` : "";
+  return (tfSplitSections(fmt || "General") || ["General"]).slice(0, 3).map(sec => q(prefix) + (sec || "General") + q(suffix)).join(";");
 }
 
 export function tfSplitSections(s) {

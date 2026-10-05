@@ -19,6 +19,20 @@ export function tfParseRunProps(run) {
   });
 }
 
+/* a dashboard zone's Layout pane formatting: background and border */
+export function tfZoneStyle(el) {
+  if (!el) return undefined;
+  const f = {};
+  tfKids(el, "format").forEach(x => { f[x.getAttribute("attr")] = x.getAttribute("value"); });
+  const style = tfDefined({
+    bgColor: tfArgb(f["background-color"]) || undefined,
+    borderColor: tfArgb(f["border-color"]) || undefined,
+    borderStyle: f["border-style"] || undefined,
+    borderWidth: tfNum(f["border-width"])
+  });
+  return Object.keys(style).length ? style : undefined;
+}
+
 export function tfParseRuns(ftEl) {
   return tfKids(ftEl, "run").map(r => ({ text: r.textContent || "", props: tfParseRunProps(r) }));
 }
@@ -70,13 +84,25 @@ export function tfParseStyle(styleEl) {
       value: f.getAttribute("value"),
       field: f.getAttribute("field") || undefined,
       scope: f.getAttribute("scope") || undefined,
-      dataClass: f.getAttribute("data-class") || undefined
+      dataClass: f.getAttribute("data-class") || undefined,
+      axisClass: f.getAttribute("class") || undefined
     })));
   });
   Array.from(styleEl.getElementsByTagName("encoding"))
     .filter(e => e.getAttribute("attr") === "color")
     .forEach(e => encodings.push(tfParseColorEncoding(e)));
-  return { rules, encodings };
+  // Edit Axis: fixed range, tick spacing, "include zero" (encoding attr="space")
+  const spaces = Array.from(styleEl.getElementsByTagName("encoding")).filter(e => e.getAttribute("attr") === "space").map(e => tfDefined({
+    field: e.getAttribute("field") || undefined,
+    scope: e.getAttribute("scope") || undefined,
+    axisClass: e.getAttribute("class") || undefined,
+    rangeType: e.getAttribute("range-type") || undefined,
+    min: tfNum(e.getAttribute("min")),
+    max: tfNum(e.getAttribute("max")),
+    majorSpacing: tfNum(e.getAttribute("major-spacing")),
+    domainExpand: e.getAttribute("domain-expand") || undefined
+  }));
+  return spaces.length ? { rules, encodings, spaces } : { rules, encodings };
 }
 
 export function tfParseTitle(ownerEl) {
@@ -198,6 +224,22 @@ export function parseTableauFormatting(xmlString) {
     // Analytics pane box plot: <reference-line formula='iqr' boxplot-whisker-type='…'>
     sheet.boxPlot = Array.from(ws.getElementsByTagName("reference-line")).some(rl =>
       rl.getAttribute("formula") === "iqr" || rl.getAttribute("boxplot-whisker-type") != null);
+    // reference lines (Analytics → Reference Line); box-plot whiskers / distributions are not lines
+    const refIds = new Set();
+    sheet.referenceLines = Array.from(ws.getElementsByTagName("reference-line")).filter(rl => {
+      const id = rl.getAttribute("id") || "";
+      if (refIds.has(id) || rl.getAttribute("boxplot-whisker-type") != null) return false;
+      refIds.add(id);
+      return /^(average|mean|median|sum|total|min|max|constant)$/.test(rl.getAttribute("formula") || "");
+    }).map(rl => tfDefined({
+      formula: rl.getAttribute("formula"),
+      labelType: rl.getAttribute("label-type") || "automatic",
+      label: rl.getAttribute("label") || undefined,
+      scope: rl.getAttribute("scope") || undefined,
+      value: tfNum(rl.getAttribute("value")),
+      axis: tfParseFieldRef(rl.getAttribute("axis-column")) || undefined,
+      field: tfParseFieldRef(rl.getAttribute("value-column")) || undefined
+    }));
     // every field the sheet references (for name matching incl. Measure Names)
     const seen = new Set();
     const add = r => { if (r && !seen.has(r.inner.toLowerCase())) { seen.add(r.inner.toLowerCase()); sheet.fieldRefs.push(r); } };
@@ -232,7 +274,7 @@ export function parseTableauFormatting(xmlString) {
   // ── dashboards (title + style)
   tfKids(tfKid(root, "dashboards"), "dashboard").forEach(d => {
     const zones = [];
-    const walk = z => tfKids(z, "zone").forEach(c => {
+    const walk = (z, parent) => tfKids(z, "zone").forEach(c => {
       zones.push(tfDefined({
         id: c.getAttribute("id"), name: c.getAttribute("name") || undefined,
         type: c.getAttribute("type-v2") || "worksheet",
@@ -240,11 +282,18 @@ export function parseTableauFormatting(xmlString) {
         hidden: c.getAttribute("hidden-by-user") === "true",
         x: tfNum(c.getAttribute("x")), y: tfNum(c.getAttribute("y")),
         w: tfNum(c.getAttribute("w")), h: tfNum(c.getAttribute("h")),
-        runs: tfKid(c, "formatted-text") ? tfParseRuns(tfKid(c, "formatted-text")) : undefined
+        runs: tfKid(c, "formatted-text") ? tfParseRuns(tfKid(c, "formatted-text")) : undefined,
+        param: c.getAttribute("param") || undefined,             // image zones: the file inside the .twbx
+        scaled: c.getAttribute("is-scaled") === "1" || undefined,
+        // Center Image is on unless switched off (is-centered='0')
+        centered: c.getAttribute("is-centered") ? c.getAttribute("is-centered") === "1" : undefined,
+        url: c.getAttribute("url") || undefined,                   // image / button zones: the link it opens
+        parent,                                                     // the layout container it sits in
+        style: tfZoneStyle(tfKid(c, "zone-style"))
       }));
-      walk(c);
+      walk(c, c.getAttribute("id") || undefined);
     });
-    walk(tfKid(d, "zones"));            // direct child only → phone/tablet layouts are skipped
+    walk(tfKid(d, "zones"), undefined);   // direct child only → phone/tablet layouts are skipped
     const size = tfKid(d, "size");
     model.dashboards[d.getAttribute("name")] = {
       title: tfParseTitle(d), style: tfParseStyle(tfKid(d, "style")), zones,
