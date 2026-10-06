@@ -1,6 +1,6 @@
 /* View model + classification → visual model, and renderer selection. */
 import { FORMAT_CONFIG, VISUAL_TYPES } from "../config.js";
-import { classifyVisualType, resolveVisualMarks } from "./classify.js";
+import { classifyVisualType, isMarkTable, resolveVisualMarks } from "./classify.js";
 import { buildViewModel } from "./view-model.js";
 
 /**
@@ -15,6 +15,7 @@ export function buildVisualModel(model, sheetName, summary, opts = {}) {
   const spec = opts.visualSpec || null;
   const marks = resolveVisualMarks(spec, vm, model);
   const type = classifyVisualType(spec, vm, model);
+  vm.markTable = (type === VISUAL_TYPES.TABLE || type === VISUAL_TYPES.KPI) && isMarkTable(vm, model);
   const dimensions = vm.order.filter(i => vm.cols[i].isHeader).map(i => vm.cols[i]);
   const measures = vm.order.filter(i => !vm.cols[i].isHeader).map(i => vm.cols[i]);
   return {

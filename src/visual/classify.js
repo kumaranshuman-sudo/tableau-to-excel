@@ -1,5 +1,6 @@
 /* Visual type classification from marks, shelves and encodings. */
 import { VISUAL_TYPES } from "../config.js";
+import { tfDvNum } from "../data/values.js";
 import { tfSameField } from "../twb/field-ref.js";
 import { tfFieldInfo } from "../twb/formatter.js";
 
@@ -112,6 +113,28 @@ export function resolveVisualMarks(spec, vm, model) {
   return { tokens, shape, source };
 }
 
+/**
+ * A table built from marks: every axis on Rows / Columns is a constant ("MIN(0)", "0.5") that only places
+ * the marks – one column of circles, squares, shapes or bars per axis, each pane showing its label.
+ * @param {ViewModel} vm @param {FormatModel | null} model
+ */
+export function isMarkTable(vm, model) {
+  const sheet = vm.fmt && vm.fmt.sheetModel;
+  if (!sheet) return false;
+  const axes = [...sheet.rows, ...sheet.cols].filter(r => tvIsMeasureRef(model, r));
+  if (!axes.length || !sheet.panes.some(p => p.labelRuns.length || p.encodings.some(e => e.channel === "text" || e.channel === "label"))) return false;
+  // pies / donuts on MIN(0) axes are charts: only cell-like marks make a table
+  if (!sheet.panes.every(p => /^(circle|square|shape|bar|text|automatic)?$/i.test(p.markClass || ""))) return false;
+  return axes.every(r => {
+    const info = tfFieldInfo(model, r);
+    if (info && info.constant !== undefined) return true;
+    // no formula to go by: the same value on every row of the data
+    const ci = vm.cols.findIndex(c => c.ref && tfSameField(c.ref, r));
+    if (ci < 0 || vm.rows.length < 2) return false;
+    return new Set(vm.rows.map(row => tfDvNum(row[ci])).filter(v => v !== null)).size <= 1;
+  });
+}
+
 /** @param {any} spec live visual spec @param {ViewModel} vm @param {FormatModel | null} model @returns {VisualType} */
 export function classifyVisualType(spec, vm, model) {
   const { tokens, shape } = resolveVisualMarks(spec, vm, model);
@@ -122,6 +145,7 @@ export function classifyVisualType(spec, vm, model) {
   if (shape && shape.geo) {
     return shape.filled || tokens.some(t => t === "multipolygon" || t === "polygon") ? VISUAL_TYPES.MAP_FILLED : VISUAL_TYPES.MAP;
   }
+  if (axes && isMarkTable(vm, model)) return isKPIViewModel(vm) ? VISUAL_TYPES.KPI : VISUAL_TYPES.TABLE;
   if (tokens.includes("text") && tokens.every(t => /^(text|shape|circle|square)$/.test(t))) {
     return isKPIViewModel(vm) ? VISUAL_TYPES.KPI : VISUAL_TYPES.TABLE;      // KPI tiles / buttons built from marks
   }

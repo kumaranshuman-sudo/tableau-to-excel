@@ -2,9 +2,11 @@
 import { FORMAT_CONFIG } from "../config.js";
 import { tfDvText, tfIsNull } from "../data/values.js";
 import { applyConditionalFormattingToTable } from "./conditional-format.js";
+import { buildMarkPlan, tvGlyphNumFmt, writeMarkBars } from "./mark-cells.js";
 import { ROW_GROUP_THRESHOLD, getExcelColumnName, headerRowSpan } from "./layout.js";
 import { tfBuildColorScale } from "../format/color-scale.js";
-import { tfExcelFill, tfExcelFont, tfWriteCell } from "../format/excel-style.js";
+import { inferExcelNumFmt } from "../format/number-format.js";
+import { tfExcelFill, tfExcelFont, tfRichRuns, tfWriteCell } from "../format/excel-style.js";
 import { tfParseFieldRef, tfSameField } from "../twb/field-ref.js";
 import { tfMerge } from "../twb/formatter.js";
 
@@ -13,6 +15,32 @@ import { tfMerge } from "../twb/formatter.js";
  * All styling below comes from the TWB format model (createSheetFormatter).
  * If no workbook was loaded, the formatter falls back to TABLEAU_DEFAULTS.
  * ============================================================================= */
+
+/**
+ * A colour legend at its dashboard position, as Tableau draws it: the field caption in bold, then a coloured
+ * square and the value per item.
+ * @param {import("exceljs").Worksheet} worksheet @param {ExportItem} item @param {any} rangeTracker
+ * @param {Record<number, number>} colWidths
+ */
+export function writeLegendBlock(worksheet, item, rangeTracker, colWidths) {
+  const r = item.gridRow, C = item.gridCol;
+  const font = tfExcelFont(item.fmt.baseStyle());
+  const title = worksheet.getCell(r + 1, C + 1);
+  title.value = item.legend.title;
+  title.font = { ...font, bold: true };
+  rangeTracker.update(r, C);
+  item.legend.items.forEach((it, i) => {
+    worksheet.getCell(r + 2 + i, C + 1).value = { richText: [
+      { text: "■ ", font: { ...font, size: (font.size || 9) + 3, color: { argb: "FF" + (it.color || "CCCCCC") } } },
+      { text: it.text, font }
+    ] };
+    rangeTracker.update(r + 1 + i, C);
+  });
+  if (!item.layout || !item.layout.widthPx) {                 // no zone width to keep: fit the longest entry
+    const chars = Math.max(item.legend.title.length, ...item.legend.items.map(it => it.text.length + 2));
+    colWidths[C] = Math.max(colWidths[C] || 0, chars + 2);
+  }
+}
 
 export function writeTableauTitle(worksheet, r, C, text, p, span) {
   const cell = worksheet.getCell(r + 1, C + 1);
@@ -109,6 +137,8 @@ export function writeRegularTable(worksheet, vm, originRow, originCol, rangeTrac
   if (!fmt.hasModel) console.log(`[Format] No TWB format info for "${vm.title.text}" – using Tableau defaults`);
 
   const plan = buildColorPlan(fmt, cols, rows);
+  // a table built from marks: each column looks like its pane's marks (fills, arrows, data bars)
+  const marks = vm.markTable ? buildMarkPlan(fmt, cols, rows, order) : new Map();
   const tableBg = fmt.tableBackground();                       // Format → Shading → Worksheet
   const rowDiv = fmt.divider("rows");
   const colDiv = fmt.divider("cols");
@@ -155,6 +185,8 @@ export function writeRegularTable(worksheet, vm, originRow, originCol, rangeTrac
   let headerRow = r;
   if (vm.showHeaderRow) {
     const span = headerRowSpan(vm);
+    /** @type {[number, number, number, number][]} merged after every header cell is written */
+    const merges = [];
     order.forEach((ci, k) => {
       const info = cols[ci];
       let p = fmt.fieldLabelStyle(info.ref, !info.isHeader);
@@ -162,21 +194,31 @@ export function writeRegularTable(worksheet, vm, originRow, originCol, rangeTrac
       // header label sits over its column: same alignment as the values (numbers right, text left)
       if (!p.hAlign) p.hAlign = info.isHeader ? styles[ci].hAlign : (styles[ci].hAlign || (numericCol(ci) ? "right" : "left"));
       if (/\n/.test(info.label) || info.label.length > 18) p.wrap = true;
-      tfWriteCell(worksheet.getCell(r + 1, C + k + 1), { formattedValue: info.label, value: info.label }, p, {
+      const cell = worksheet.getCell(r + 1, C + k + 1);
+      tfWriteCell(cell, { formattedValue: info.label, value: info.label }, p, {
         fill: p.bgColor || tableBg || undefined,
         border: { bottom: borderSide(rowDiv), right: k < numCols - 1 ? borderSide(colDiv) : undefined }
       });
-      // Tableau's header height as 20 px rows merged down; the label wraps in it, centred as Tableau draws it
-      // (which also keeps it clear of the filter buttons on the last row)
-      if (span > 1) {
-        const cell = worksheet.getCell(r + 1, C + k + 1);
+      // a dashboard text box as the header: its runs (fonts, sizes, line breaks) as rich text
+      if (info.labelRuns && info.labelRuns.length && !info.headerCovered) {
+        cell.value = { richText: tfRichRuns(info.labelRuns, p) };
         cell.alignment = { ...(cell.alignment || {}), wrapText: true };
-        for (let i = 1; i < span; i++) worksheet.getCell(r + 1 + i, C + k + 1).border = cell.border;
-        worksheet.mergeCells(r + 1, C + k + 1, r + span, C + k + 1);
-        for (let i = 0; i < span; i++) worksheet.getRow(r + 1 + i).height = 15;
       }
+      // Tableau's header height as 20 px rows merged down, and a header over several panes merged across;
+      // the label wraps in it, centred as Tableau draws it (which also keeps it clear of the filter buttons
+      // on the last row)
+      const across = info.headerSpan || 1;
+      if (!info.headerCovered && (span > 1 || across > 1)) {
+        cell.alignment = { ...(cell.alignment || {}), wrapText: true };
+        for (let i = 0; i < span; i++) for (let j = 0; j < across; j++) {
+          if (i || j) worksheet.getCell(r + 1 + i, C + k + 1 + j).border = cell.border;
+        }
+        merges.push([r + 1, C + k + 1, r + span, C + k + across]);
+      }
+      if (span > 1) for (let i = 0; i < span; i++) worksheet.getRow(r + 1 + i).height = 15;
       rangeTracker.update(r + span - 1, C + k);
     });
+    merges.forEach(m => worksheet.mergeCells(...m));
     // wrapped labels and no height stored: at most two lines, not a row Excel grows to fit every word
     if (span === 1 && !fmt.headerRowHeightPx() && order.some(ci => /\n/.test(cols[ci].label) || cols[ci].label.length > 18)) {
       worksheet.getRow(r + 1).height = 26;
@@ -210,12 +252,24 @@ export function writeRegularTable(worksheet, vm, originRow, originCol, rangeTrac
       // fill precedence: mark colour > own shading > banding > worksheet background
       const bandFill = banded ? (cols[ci].isHeader ? band.header : band.pane) : null;
       extra.fill = p.bgColor || bandFill || tableBg || undefined;
-      if (rowColor && plan.markIdx.has(ci)) {
+      const mk = marks.get(ci);
+      if (rowColor && plan.markIdx.has(ci) && !mk) {
         if (plan.enc.applyTo === "fill") extra.fill = rowColor;
         else if (!p.explicitColor) extra.fontColor = rowColor;
       }
-      const dv = row[ci];
+      let dv = row[ci];
       const text = tfDvText(dv);
+      if (mk && !tfIsNull(dv)) {
+        const color = mk.colorAt(rowIdx);
+        if (mk.kind === "fill" && color) extra.fill = color;              // circle / square: the cell is the mark
+        if (mk.kind === "glyph") {                                        // arrow shape before the label, in its colour
+          if (color && !p.explicitColor) extra.fontColor = color;
+          const glyph = mk.glyphAt(rowIdx);
+          const native = dv.nativeValue !== undefined ? dv.nativeValue : dv.value;
+          if (glyph && typeof native === "number") p = { ...p, numFmt: tvGlyphNumFmt(p.numFmt || inferExcelNumFmt(text, native) || "General", glyph) };
+          else if (glyph) dv = { ...dv, formattedValue: `${glyph} ${text}` };
+        }
+      }
       if (cols[ci].link) {                                      // URL action → clickable cell
         const url = cols[ci].link.expression.replace(/<([^<>]+)>/g, (m, inner) => {
           const part = cols[ci].link.parts.find(x => ("[" + x.token.inner + "]") === inner || x.token.raw === inner);
@@ -241,6 +295,8 @@ export function writeRegularTable(worksheet, vm, originRow, originCol, rangeTrac
     r++;
   });
 
+  if (marks.size) writeMarkBars(worksheet, marks, cols, rows, order, dataStartRow, C);
+
   if (needsGrouping) {
     const hiddenCount = totalRows - keepRows;
     const noteCell = worksheet.getCell(r + 1, C + 1);
@@ -257,7 +313,7 @@ export function writeRegularTable(worksheet, vm, originRow, originCol, rangeTrac
       order.map(ci => ({ fieldName: cols[ci].name })), dataStartRow, C, {});
   }
 
-  if (allTablesInfo) {
+  if (allTablesInfo && !vm.markTable) {                    // a table built from marks gets no filter buttons
     allTablesInfo.push({ name: vm.title.text, headerRow: vm.showHeaderRow ? headerRow : dataStartRow,
       leftCol: C, rightCol: C + numCols - 1,
       bottomRow: dataStartRow + totalRows - 1,             // last DATA row – the grouping note stays outside the filter

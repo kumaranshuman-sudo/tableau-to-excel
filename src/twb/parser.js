@@ -126,6 +126,16 @@ export function tfParseTitle(ownerEl) {
   return { text: runs.map(r => r.text).join("").trim(), runs };
 }
 
+/**
+ * A calculation that is one number ("0.5", "MIN(0)"): an axis that only positions marks, e.g. the columns
+ * of a table built from marks.
+ * @param {Element | null} calc @returns {number | undefined}
+ */
+function tfConstantFormula(calc) {
+  const m = calc && String(calc.getAttribute("formula") || "").match(/^\s*(?:(?:MIN|MAX|AVG|SUM|ATTR)\s*\(\s*(-?\d+(?:\.\d+)?)\s*\)|(-?\d+(?:\.\d+)?))\s*$/i);
+  return m ? Number(m[1] ?? m[2]) : undefined;
+}
+
 /** @param {string} xmlString the .twb XML @returns {FormatModel} */
 export function parseTableauFormatting(xmlString) {
   const doc = new DOMParser().parseFromString(xmlString, "text/xml");
@@ -147,7 +157,8 @@ export function parseTableauFormatting(xmlString) {
         datatype: col.getAttribute("datatype") || undefined,
         defaultFormat: col.getAttribute("default-format") || undefined,
         alias: col.getAttribute("alias") || undefined,      // parameters: current value's display text
-        value: col.getAttribute("value") || undefined
+        value: col.getAttribute("value") || undefined,
+        constant: tfConstantFormula(tfKid(col, "calculation"))
       });
       model.fields[dsName + "|" + n.toLowerCase()] = info;
       if (!model.fields["|" + n.toLowerCase()]) model.fields["|" + n.toLowerCase()] = info;
@@ -221,6 +232,8 @@ export function parseTableauFormatting(xmlString) {
       })).filter(e => e.field);
       const cl = tfKid(p, "customized-label");
       const labelRuns = cl ? tfParseRuns(tfKid(cl, "formatted-text")) : [];
+      const ct = tfKid(p, "customized-tooltip");                 // Tooltip editor text
+      const tooltipRuns = ct ? tfParseRuns(tfKid(ct, "formatted-text")) : [];
       sheet.panes.push({
         id: p.getAttribute("id") || null,
         xIndex: tfNum(p.getAttribute("x-index")),
@@ -230,6 +243,7 @@ export function parseTableauFormatting(xmlString) {
         markClass: mark ? mark.getAttribute("class") : "Automatic",
         encodings,
         labelRuns: labelRuns.map(r => ({ refs: tfExtractRefs(r.text.replace(/^<|>$/g, "")), text: r.text, props: r.props })),
+        tooltipRuns,
         style: tfParseStyle(tfKid(p, "style"))
       });
     });
@@ -256,12 +270,14 @@ export function parseTableauFormatting(xmlString) {
     const seen = new Set();
     const add = r => { if (r && !seen.has(r.inner.toLowerCase())) { seen.add(r.inner.toLowerCase()); sheet.fieldRefs.push(r); } };
     sheet.runningTotals = [];                                    // waterfall: running-sum table calcs
+    sheet.tableCalcs = {};                                       // quick table calc → its "compute using" (ordering-type)
     Array.from(ws.getElementsByTagName("column-instance")).forEach(ci => {
       const depDs = ci.parentNode && ci.parentNode.getAttribute && ci.parentNode.getAttribute("datasource");
       const ref = tfParseFieldRef((depDs ? "[" + depDs + "]." : "") + ci.getAttribute("name"));
       add(ref);
       const calc = tfKid(ci, "table-calc");
       if (ref && calc && /^(cumtotal|runningtotal)$/i.test(calc.getAttribute("type") || "")) sheet.runningTotals.push(ref);
+      if (ref && calc) sheet.tableCalcs[ref.inner.toLowerCase()] = calc.getAttribute("ordering-type") || "";
     });
     sheet.rows.forEach(add); sheet.cols.forEach(add);
     sheet.panes.forEach(p => p.encodings.forEach(e => add(e.field)));
@@ -295,7 +311,7 @@ export function parseTableauFormatting(xmlString) {
         x: tfNum(c.getAttribute("x")), y: tfNum(c.getAttribute("y")),
         w: tfNum(c.getAttribute("w")), h: tfNum(c.getAttribute("h")),
         runs: tfKid(c, "formatted-text") ? tfParseRuns(tfKid(c, "formatted-text")) : undefined,
-        param: c.getAttribute("param") || undefined,             // image zones: the file inside the .twbx
+        param: c.getAttribute("param") || undefined,             // image zones: the file inside the .twbx; legends: their field
         scaled: c.getAttribute("is-scaled") === "1" || undefined,
         // Center Image is on unless switched off (is-centered='0')
         centered: c.getAttribute("is-centered") ? c.getAttribute("is-centered") === "1" : undefined,
@@ -312,6 +328,17 @@ export function parseTableauFormatting(xmlString) {
       width: size ? tfNum(size.getAttribute("maxwidth")) : undefined,
       height: size ? tfNum(size.getAttribute("maxheight")) : undefined
     };
+  });
+
+  // ── each sheet's fit on each dashboard (<window class='dashboard'> viewpoints: "entire-view", "fit-width" …)
+  tfKids(tfKid(root, "windows"), "window").forEach(w => {
+    const dash = w.getAttribute("class") === "dashboard" && model.dashboards[w.getAttribute("name")];
+    if (!dash) return;
+    dash.fit = {};
+    tfKids(tfKid(w, "viewpoints"), "viewpoint").forEach(v => {
+      const z = tfKid(v, "zoom");
+      if (z) dash.fit[v.getAttribute("name")] = z.getAttribute("type");
+    });
   });
 
   tfDebugDump(model);

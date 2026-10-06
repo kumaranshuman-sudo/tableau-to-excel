@@ -121,6 +121,8 @@ interface Pane {
   markClass: string;
   encodings: { channel: string; field: FieldRef }[];
   labelRuns: { refs: FieldRef[]; text: string; props: Record<string, any> }[];
+  /** Tooltip editor text, [] = Tableau's default tooltip */
+  tooltipRuns?: TextRun[];
   style: ParsedStyle;
 }
 
@@ -138,6 +140,8 @@ interface SheetModel {
   boxPlot?: boolean;
   referenceLines?: ReferenceLine[];
   runningTotals?: FieldRef[];
+  /** quick table calcs: field inner name → "compute using" (ordering-type: rows, columns …) */
+  tableCalcs?: Record<string, string>;
 }
 
 /** A dashboard zone; x / y / w / h are in Tableau's 0–100000 units. */
@@ -171,6 +175,8 @@ interface DashboardModel {
   zones: DashboardZone[];
   width?: number;
   height?: number;
+  /** each sheet's fit on the dashboard: "entire-view" | "fit-width" | "fit-height" (none = Standard) */
+  fit?: Record<string, string>;
 }
 
 interface FieldInfo {
@@ -182,6 +188,8 @@ interface FieldInfo {
   defaultFormat?: string;
   alias?: string;
   value?: string;
+  /** a calculation that is a single number ("MIN(0)") */
+  constant?: number;
 }
 
 /** parseTableauFormatting() result. */
@@ -213,6 +221,12 @@ interface ViewColumn {
   isHeader?: boolean;
   label?: string;
   labelProps?: Record<string, any>;
+  /** a dashboard text box as the header: its runs */
+  labelRuns?: any[];
+  /** the header spans this many columns (one text box over several panes) */
+  headerSpan?: number;
+  /** under another column's spanning header */
+  headerCovered?: boolean;
   zoneWidthPx?: number;
   link?: { caption?: string; [key: string]: any };
 }
@@ -229,6 +243,10 @@ interface ViewModel {
   title: { text: string; props: Record<string, any> };
   showTitle: boolean;
   headerZoneIds: string[];
+  /** a table built from marks (constant axes): columns drawn like their panes' marks */
+  markTable?: boolean;
+  /** height (px) of the dashboard text boxes drawn as the headers, 0 = none */
+  headerPx?: number;
   dashboardName?: string;
   kind: "chart" | "table";
   /** all header columns (hidden ones too), outer → inner */
@@ -277,6 +295,8 @@ interface VisualModel {
   status?: string;
   statusReason?: string;
   chartSpecs?: ChartSpec[];
+  /** a pie / donut drawn by charts/model/pie.js */
+  pie?: any;
 }
 
 /* ── chart model (charts/model) ──────────────────────────────────────────── */
@@ -496,6 +516,10 @@ interface ChartJob {
   pane?: number;
   panes?: number;
   item?: any;
+  /** a pie / donut: finished chart XML, its label shapes part, its tooltip wedges (px inside the chart) */
+  xml?: string;
+  shapes?: string | null;
+  tips?: { x: number; y: number; w: number; h: number; prst: string; adj?: number[]; text: string; link: string }[];
 }
 
 /* ── export (export/export.js) ───────────────────────────────────────────── */
@@ -519,7 +543,7 @@ interface ImageBlock {
 }
 
 interface ExportItem {
-  type: "worksheet" | "filterValue" | "text" | "image";
+  type: "worksheet" | "filterValue" | "text" | "image" | "legend";
   name: string;
   visualName: string;
   /** dashboard zone → grid position (export/layout.js) */
@@ -557,6 +581,9 @@ interface ExportItem {
   splitPx?: number[];
   /** dashboard image object (logo, icon) with its own zone */
   image?: ImageBlock;
+  /** a pie's colour legend: its title and swatches, the formatter of its sheet */
+  legend?: { title: string; items: { text: string; color: string | null }[] };
+  fmt?: SheetFormatter;
 }
 
 /* ── browser APIs the panel feature-detects (File System Access; Chromium only) ── */

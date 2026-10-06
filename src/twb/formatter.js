@@ -2,6 +2,7 @@
 import { TABLEAU_DEFAULTS, TF_DERIV_LABEL, TF_ELEMENTS } from "../config.js";
 import { tfArgb } from "../format/colors.js";
 import { tableauToExcelNumFmt } from "../format/number-format.js";
+import { TABLEAU_10 } from "../format/palettes.js";
 import { tfStrokeToBorder } from "./dashboard-text.js";
 import { tfParseFieldRef, tfRefKey, tfSameField, tfTableCalcBase } from "./field-ref.js";
 import { tfNorm, tfNum } from "../util.js";
@@ -84,11 +85,17 @@ export function tfDashboardShading(model, dashboardName) {
 }
 
 /** @param {FormatModel | null} model @param {string} sheetName */
-export function createSheetFormatter(model, sheetName) {
+/**
+ * @param {FormatModel | null} model @param {string} sheetName
+ * @param {Pane[]} [onlyPanes] scope the Marks-card methods to these panes (one layer of a dual-axis donut)
+ */
+export function createSheetFormatter(model, sheetName, onlyPanes) {
   const sheet = (model && model.sheets && model.sheets[sheetName]) || null;
   const wb = model ? model.workbookStyle : null;
   const st = sheet ? sheet.style : null;
-  const panes = sheet ? sheet.panes : [];
+  const panes = onlyPanes || (sheet ? sheet.panes : []);
+  /** @param {Pane} p @param {string} attr */
+  const markRule = (p, attr) => (((p.style && p.style.rules.mark) || []).find(x => x.attr === attr) || {}).value;
   const matchCache = new Map();
 
   function base() {
@@ -209,7 +216,18 @@ export function createSheetFormatter(model, sheetName) {
       return tfCollect(st, TF_ELEMENTS.cell.concat(TF_ELEMENTS.header), { field: ref, scope: "cols" }).width
           || tfCollect(st, TF_ELEMENTS.cell.concat(TF_ELEMENTS.header), { field: ref }).width || null;
     },
-    rowHeightPx() { return tfCollect(st, TF_ELEMENTS.cell).height || null; },
+    /* row height: Format → Cell height, which Tableau stores on the innermost Rows dimension when set by
+       dragging the row border */
+    rowHeightPx() {
+      const own = tfCollect(st, TF_ELEMENTS.cell).height;
+      if (own) return own;
+      const dims = sheet ? sheet.rows.filter(r => r.type !== "qk") : [];
+      for (let i = dims.length - 1; i >= 0; i--) {
+        const h = tfCollect(st, TF_ELEMENTS.cell, { field: dims[i] }).height;
+        if (h) return h;
+      }
+      return null;
+    },
 
     /* fields on Text / Label – these are the "marks" that get coloured */
     textRefs() {
@@ -223,23 +241,41 @@ export function createSheetFormatter(model, sheetName) {
 
     colorEncoding() {
       for (const p of panes) {
-        const enc = p.encodings.find(e => e.channel === "color");
-        if (!enc) continue;
-        const ref = enc.field;
-        const hasText = p.encodings.some(e => e.channel === "text" || e.channel === "label") || p.labelRuns.length > 0;
-        const cls = String(p.markClass || "Automatic");
-        const effective = /^automatic$/i.test(cls) && hasText ? "Text" : cls;
-        const pool = [st, ...panes.map(x => x.style), model && model.datasourceStyles[ref.ds],
-                      ...(model ? Object.values(model.datasourceStyles) : [])].filter(Boolean);
-        let def = null;
-        for (const s of pool) { def = s.encodings.find(e => tfSameField(e.field, ref)); if (def) break; }
-        if (!def) for (const s of pool) { def = s.encodings.find(e => e.field && tfNorm(e.field.name) === tfNorm(ref.name)); if (def) break; }
-        const paneRefs = [...p.encodings.filter(e => e.channel === "text" || e.channel === "label").map(e => e.field),
-                          ...p.labelRuns.flatMap(r => r.refs)];
-        return { ref, def, markClass: effective, applyTo: /^text$/i.test(effective) ? "font" : "fill", paneRefs,
-                 continuous: ref.type ? /^q/.test(ref.type) : !!(def && def.type === "interpolated") };
+        const out = this.colorEncodingOf(p);
+        if (out) return out;
       }
       return null;
+    },
+
+    /** a Shape encoding's value → shape map ("Arrows/1-4.png", ":filled/circle"): sheet, then data source
+     * @param {FieldRef} ref @returns {Record<string, string> | null} */
+    shapeMap(ref) {
+      const pool = [st, ...(model ? Object.values(model.datasourceStyles) : []), wb].filter(Boolean);
+      for (const s of pool) {
+        const def = (s.shapes || []).find(x => tfSameField(x.field, ref)) ||
+                    (s.shapes || []).find(x => x.field && tfNorm(x.field.name) === tfNorm(ref.name));
+        if (def) return def.map;
+      }
+      return null;
+    },
+
+    /** one pane's Color encoding (a sheet built from marks has one per pane) @param {any} p a pane */
+    colorEncodingOf(p) {
+      const enc = p.encodings.find(e => e.channel === "color" && e.field);
+      if (!enc) return null;
+      const ref = enc.field;
+      const hasText = p.encodings.some(e => e.channel === "text" || e.channel === "label") || p.labelRuns.length > 0;
+      const cls = String(p.markClass || "Automatic");
+      const effective = /^automatic$/i.test(cls) && hasText ? "Text" : cls;
+      const pool = [st, ...panes.map(x => x.style), model && model.datasourceStyles[ref.ds],
+                    ...(model ? Object.values(model.datasourceStyles) : [])].filter(Boolean);
+      let def = null;
+      for (const s of pool) { def = s.encodings.find(e => tfSameField(e.field, ref)); if (def) break; }
+      if (!def) for (const s of pool) { def = s.encodings.find(e => e.field && tfNorm(e.field.name) === tfNorm(ref.name)); if (def) break; }
+      const paneRefs = [...p.encodings.filter(e => e.channel === "text" || e.channel === "label").map(e => e.field),
+                        ...p.labelRuns.flatMap(r => r.refs)];
+      return { ref, def, markClass: effective, applyTo: /^text$/i.test(effective) ? "font" : "fill", paneRefs,
+               continuous: ref.type ? /^q/.test(ref.type) : !!(def && def.type === "interpolated") };
     },
 
     shelfOf,
@@ -383,16 +419,120 @@ export function createSheetFormatter(model, sheetName) {
     },
     /* panes in visual order with the fields they label */
     panesInOrder() {
+      // a pane drawn on its own axis sits where that axis is on Columns / Rows (one pane per measure)
+      const shelfPos = p => {
+        const x = p.xAxisName ? sheet.cols.findIndex(r => tfSameField(r, tfParseFieldRef(p.xAxisName))) : -1;
+        if (x >= 0) return x;
+        return p.yAxisName ? sheet.rows.findIndex(r => tfSameField(r, tfParseFieldRef(p.yAxisName))) : -1;
+      };
       return panes.map((p, i) => ({
         pane: p, i,
-        order: p.xIndex !== undefined ? p.xIndex : (p.xAxisName ? 0 : (panes.length > 1 ? -1 : 0)),
+        order: p.xIndex !== undefined && p.xIndex !== null ? p.xIndex
+          : shelfPos(p) >= 0 ? shelfPos(p) : (p.xAxisName ? 0 : (panes.length > 1 ? -1 : 0)),
         refs: [...p.labelRuns.flatMap(r => r.refs),
                ...p.encodings.filter(e => e.channel === "text" || e.channel === "label").map(e => e.field)]
       })).sort((a, b) => a.order - b.order || a.i - b.i);
     },
+    /* ── pies and donuts ── */
+    /** pie layers { outer, hole, inner } on a dual axis (MIN(0) twice); the later axis draws on top.
+     *   single pie                                       → { outer }
+     *   donut: + a Pie / Circle layer with nothing on its card splitting it into slices → { outer, hole }
+     *   nested donut: two coloured pies, the top one smaller                           → { outer, inner }
+     * A layer underneath that the top layer covers is dropped (plain pie). The id-less "All" pane draws nothing.
+     * null: not a pie (or 3+ layers). */
+    pieLayers() {
+      const drawn = panes.length > 1 && panes.some(p => p.id) ? panes.filter(p => p.id) : panes;
+      const isPieP = p => /^pie$/i.test(p.markClass || "");
+      if (drawn.length === 1) return isPieP(drawn[0]) ? { outer: drawn[0], hole: null, inner: null } : null;
+      if (drawn.length !== 2) return null;
+      const splits = p => p.encodings.some(e => e.channel === "wedge-size" || (/^(color|lod)$/.test(e.channel) && e.field.type !== "qk"));
+      const oi = drawn.findIndex(splits), hi = 1 - oi;
+      if (oi < 0) return null;
+      if (splits(drawn[hi])) {                                   // nested donut
+        if (!drawn.every(isPieP)) return null;
+        const size = p => parseFloat(markRule(p, "size")) || 1;
+        const [bottom, top] = drawn;
+        return size(top) < size(bottom) ? { outer: bottom, hole: null, inner: top } : { outer: top, hole: null, inner: null };
+      }
+      if (!isPieP(drawn[oi]) || !/^(pie|circle)$/i.test(drawn[hi].markClass || "")) return null;
+      return { outer: drawn[oi], hole: hi > oi ? drawn[hi] : null, inner: null };
+    },
+    /** Marks → Color for a pane without a colour field, RRGGBB; Tableau blue if unset */
+    markColor() {
+      const v = panes.map(p => markRule(p, "mark-color")).find(Boolean);
+      return ((v && tfArgb(v)) || TABLEAU_10[0]).slice(2);
+    },
+    /** the axis measure of each pane, e.g. one layer's own MIN(0) of a dual-axis donut */
+    axisRefs() { return panes.map(p => p.yAxisName || p.xAxisName).filter(Boolean).map(tfParseFieldRef); },
+    /** fields on the Marks card by channel ("color", "wedge-size", "text" …) @param {RegExp} channelRe */
+    encodingRefs(channelRe) { return panes.flatMap(p => p.encodings.filter(e => channelRe.test(e.channel)).map(e => e.field)); },
+    baseStyle: base,
+    /** Marks → Size slider value; null = never moved */
+    markSize() {
+      for (const p of panes) {
+        const v = parseFloat(markRule(p, "size"));
+        if (isFinite(v)) return v;
+      }
+      return null;
+    },
+    /** Label → "Allow labels to overlap other marks" off (Tableau's default) → overlapping labels hidden */
+    markLabelsCulled() { return panes.some(p => markRule(p, "mark-labels-cull") !== "false"); },
+    /** Label → "Show mark labels"; unset = on when something is on Label */
+    markLabelsShown() {
+      return panes.some(p => {
+        const f = markRule(p, "mark-labels-show");
+        if (f !== undefined) return f === "true";
+        return p.labelRuns.length > 0 || p.encodings.some(e => e.channel === "text" || e.channel === "label");
+      });
+    },
+    /** label text as runs [{text, props}]: the Label editor, else Tableau's default (each field on Label on its
+     * own line); text holds <[ds].[field]> placeholders */
+    labelRunsTemplate() {
+      const p = panes[0];
+      if (!p) return [];
+      if (p.labelRuns.length) return p.labelRuns.map(r => ({ text: r.text, props: r.props }));
+      return p.encodings.filter(e => e.channel === "text" || e.channel === "label")
+        .map((e, i) => ({ text: (i ? "\n" : "") + "<" + e.field.raw + ">", props: {} }));
+    },
+    hasCustomTooltip() { return !!(panes[0] && panes[0].tooltipRuns && panes[0].tooltipRuns.length); },
+    /** tooltip text as runs: the Tooltip editor, else Tableau's default "Caption: <field>" per field in the view */
+    tooltipTemplate() {
+      const p = panes[0];
+      if (p && p.tooltipRuns && p.tooltipRuns.length) return p.tooltipRuns.map(r => ({ text: r.text, props: r.props }));
+      /** @type {FieldRef[]} */
+      const refs = [];
+      const add = r => { if (r && !refs.some(x => tfSameField(x, r))) refs.push(r); };
+      // dual axis: a pane shows only its own axis measure, not the other layer's
+      const axis = p && (p.yAxisName || p.xAxisName) ? tfParseFieldRef(p.yAxisName || p.xAxisName) : null;
+      (sheet ? [...sheet.rows, ...sheet.cols] : []).filter(r => !axis || r.type !== "qk" || tfSameField(r, axis)).forEach(add);
+      (p ? p.encodings : []).forEach(e => add(e.field));
+      // dimensions first, then measures by instance name – as Tableau lists them on the dashboards seen so far
+      refs.sort((a, b) => Number(a.type === "qk") - Number(b.type === "qk") || (a.type === "qk" ? a.inner.localeCompare(b.inner) : 0));
+      // quick table calc "[pcto:sum:Qty:qk]" → "% of Total Qty along Table (Across)"
+      const ALONG = { rows: " along Table (Across)", columns: " along Table (Down)" };
+      const cap = r => /^pcto$/i.test(r.deriv || "")
+        ? "% of Total " + this.captionFor({ ...r, deriv: r.name.split(":")[0], name: r.name.split(":").pop() }, r.name) +
+          (ALONG[String(((sheet && sheet.tableCalcs) || {})[r.inner.toLowerCase()] || "").toLowerCase()] || "")
+        : this.captionFor(r, r.name);
+      return refs.map((r, i) => ({ text: (i ? "\n" : "") + cap(r) + ": <" + r.raw + ">", props: {} }));
+    },
+    /** font of a label run: worksheet font < Format → Label < the run's own font @param {Record<string, any>} runProps */
+    labelFont(runProps) {
+      return tfMerge(base(), tfCollect(wb, TF_ELEMENTS.datalabel), tfCollect(st, TF_ELEMENTS.datalabel),
+        ...panes.map(p => tfCollect(p.style, TF_ELEMENTS.datalabel)), runProps);
+    },
+    /** Excel number format of a field's values @param {FieldRef} ref */
+    numFmtFor: ref => numFmt(ref, false),
+    /** the sheet's fit on a dashboard: "entire-view" | "fit-width" | "fit-height" | null (Standard) @param {string} dashboardName */
+    fitMode(dashboardName) {
+      const d = model && model.dashboards && model.dashboards[dashboardName];
+      return (d && d.fit && d.fit[sheetName]) || null;
+    },
+
     /* chart vs table: a visible continuous axis, or only chart marks with no text */
     isChart() {
       if (!sheet) return false;
+      if (this.pieLayers()) return true;                         // pies usually carry labels
       for (const shelf of ["rows", "cols"]) {
         for (const r of sheet[shelf]) {
           const continuous = r.type === "qk" || r.name === "Multiple Values";

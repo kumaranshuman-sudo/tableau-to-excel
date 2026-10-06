@@ -19,12 +19,13 @@ export const FORMAT_CONFIG = {
   chartPolicy: "data",            // charts that cannot be drawn: "skip" | "data" (export their data as a plain table)
   groupOverflowRows: true,        // collapse rows beyond ROW_GROUP_THRESHOLD into an expandable [+]/[-] group
   autoFilter: "largest",          // Excel allows ONE autofilter per sheet: "largest" table | "none"
-  textBoxHeaders: true,           // use dashboard text boxes as column headers – only when they line up exactly with the table
+  textBoxHeaders: true,           // dashboard text boxes over a table as its column headers (one box per column or per group of panes)
   textBoxTitle: false,            // text boxes are drawn in place now; true = also use the top one as the sheet title
   linkText: "url",                // URL-action cells: "url" shows the link itself, any other string is shown as the text
   sheetGridlines: false,          // Excel's cell grid on the dashboard sheet – Tableau dashboards have none
   printFitToWidth: true,          // printing / PDF: the dashboard one page wide, landscape when it is wider than tall
-  debug: true
+  tableauTextScale: null,         // Tableau label text vs its pixels (Windows display scaling) for pie label placement; null = the browser's devicePixelRatio
+  debug: false                    // true: dump the parsed workbook model and [Format] traces to the console
 };
 
 export const VISUAL_TYPES = Object.freeze({

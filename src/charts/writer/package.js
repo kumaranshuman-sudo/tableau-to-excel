@@ -4,6 +4,7 @@ import { CHARTEX_COLORS, CHARTEX_STYLE } from "./chartex-style.js";
 import { anchorExXml, chartExXml } from "./chartex.js";
 import { CT_CHART, CT_CHARTCOLORS, CT_CHARTEX, CT_CHARTSTYLE, CT_DRAWING, EMPTY_RELS, EMU_PER_PX, NS, REL_CHART, REL_CHARTCOLORS, REL_CHARTEX, REL_CHARTSTYLE, REL_DRAWING } from "./constants.js";
 import { chartXml } from "./drawingml.js";
+import { CT_USER_SHAPES, REL_HYPERLINK, REL_USER_SHAPES, groupedAnchorXml } from "./pie.js";
 import { attr, esc } from "./xml-util.js";
 
 /** <sheetPr> children in schema order (tabColor, outlinePr, pageSetUpPr): ExcelJS writes pageSetUpPr first
@@ -136,6 +137,7 @@ export async function injectCharts(buffer, opts) {
     sheetRels = addRel(sheetRels, rid, REL_DRAWING, `../drawings/drawing${n}.xml`);
     sheetXml = insertDrawingTag(sheetXml, rid);
     ct = addOverride(ct, drawingPath, CT_DRAWING);
+    zip.file(drawingPath, drawingXml);                    // claim the name now: charts' label parts are drawings too
   }
   if (!/<xdr:wsDr\b[^>]*\sxmlns:a=/.test(drawingXml)) {
     drawingXml = drawingXml.replace(/<xdr:wsDr\b/, `<xdr:wsDr xmlns:a="${NS.a}"`);
@@ -177,9 +179,28 @@ export async function injectCharts(buffer, opts) {
     }
     const n = nextFreeIndex(zip, "xl/charts/chart", ".xml");
     const chartPath = `xl/charts/chart${n}.xml`;
-    zip.file(chartPath, chartXml(chart.spec, chart.refs, chart));
+    // a pie / donut arrives as finished chart XML, with its label shapes and tooltip wedges
+    zip.file(chartPath, chart.xml || chartXml(chart.spec, chart.refs, chart));
     ct = addOverride(ct, chartPath, CT_CHART);
     drawingRels = addRel(drawingRels, rid, REL_CHART, `../charts/chart${n}.xml`);
+    if (chart.shapes) {                                    // labels / centre text: the chart's own drawing part
+      const d = nextFreeIndex(zip, "xl/drawings/drawing", ".xml");
+      const shapesPath = `xl/drawings/drawing${d}.xml`;
+      zip.file(shapesPath, chart.shapes);
+      ct = addOverride(ct, shapesPath, CT_USER_SHAPES);
+      zip.file(relsPathOf(chartPath), addRel(EMPTY_RELS, "rId1", REL_USER_SHAPES, `../drawings/drawing${d}.xml`));
+    }
+    if (chart.tips && chart.tips.length) {                // tooltips: hyperlink ScreenTips on wedges over the slices
+      const tipRids = chart.tips.map(t => {
+        const tid = nextRelId(drawingRels);
+        drawingRels = addRel(drawingRels, tid, REL_HYPERLINK, esc(t.link));
+        return tid;
+      });
+      const ids = { next: shapeId };
+      anchors += groupedAnchorXml(chart, rid, ids, tipRids);
+      shapeId = ids.next;
+      continue;
+    }
     anchors += anchorXml(chart, shapeId++, rid);
   }
   // charts first: pictures ExcelJS placed (icons over a chart) stay in front of them
