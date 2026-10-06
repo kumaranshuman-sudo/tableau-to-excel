@@ -4,7 +4,7 @@ import { tvApplyReferenceLines } from "./reflines.js";
 import { tvCartesianSpecs, tvHistogramSpecs } from "./cartesian.js";
 import { tvMarkToken } from "./common.js";
 import { tvRoles } from "./roles.js";
-import { tvBoxPlotSpec, tvGanttSpec, tvPackedBubbleSpec, tvPieSpec, tvScatterSpec, tvSymbolMapSpec, tvTreemapSpec, tvWaterfallSpec } from "./specialized.js";
+import { tvBoxPlotSpec, tvGanttSpec, tvPackedBubbleSpec, tvPieSpec, tvScatterSpec, tvTreemapSpec, tvWaterfallSpec } from "./specialized.js";
 import { VISUAL_TYPES } from "../../config.js";
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -40,7 +40,6 @@ export function buildExcelChartSpecs(visualModel, model) {
   else if (visualModel.type === VISUAL_TYPES.BOXPLOT) specs = tvBoxPlotSpec(ctx);
   else if (visualModel.type === VISUAL_TYPES.GANTT) specs = tvGanttSpec(ctx);
   else if (visualModel.type === VISUAL_TYPES.TREEMAP) specs = tvTreemapSpec(ctx);
-  else if (visualModel.type === VISUAL_TYPES.MAP) specs = tvSymbolMapSpec(ctx);
   else if (visualModel.type === VISUAL_TYPES.BUBBLE) specs = tvPackedBubbleSpec(ctx);
   else if (visualModel.type === VISUAL_TYPES.PIE) {
     ctx.doughnut = roles.panes.filter(p => tvMarkToken(p.markClass) === "pie").length >= 2;

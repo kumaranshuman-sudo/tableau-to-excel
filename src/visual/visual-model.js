@@ -75,10 +75,11 @@ export const VISUAL_RENDERERS = Object.freeze({
   chartTypes: /** @type {Set<VisualType>} */ (new Set([VISUAL_TYPES.BAR, VISUAL_TYPES.COLUMN, VISUAL_TYPES.LINE, VISUAL_TYPES.AREA,
                        VISUAL_TYPES.PIE, VISUAL_TYPES.SCATTER, VISUAL_TYPES.COMBO, VISUAL_TYPES.HISTOGRAM,
                        VISUAL_TYPES.WATERFALL, VISUAL_TYPES.BOXPLOT, VISUAL_TYPES.GANTT, VISUAL_TYPES.TREEMAP,
-                       VISUAL_TYPES.BUBBLE, VISUAL_TYPES.MAP])),
-  // createVizImageAsync draws bar / line / area / square / circle / text marks only
-  // (no pie, gantt or polygon marks); a symbol map is drawn as circles on lat/long without a basemap
+                       VISUAL_TYPES.BUBBLE])),
+  // createVizImageAsync draws bar / line / area / square / circle / text marks only (no pie, gantt or polygon
+  // marks). Maps – symbol or filled – are neither: without the basemap they don't read as maps, so they are
+  // exported as a table of their marks (data-fallback)
   imageTypes: /** @type {Set<VisualType>} */ (new Set([VISUAL_TYPES.BAR, VISUAL_TYPES.COLUMN, VISUAL_TYPES.LINE, VISUAL_TYPES.AREA, VISUAL_TYPES.SCATTER,
-                       VISUAL_TYPES.COMBO, VISUAL_TYPES.HISTOGRAM, VISUAL_TYPES.TREEMAP, VISUAL_TYPES.BUBBLE, VISUAL_TYPES.MAP])),
+                       VISUAL_TYPES.COMBO, VISUAL_TYPES.HISTOGRAM, VISUAL_TYPES.TREEMAP, VISUAL_TYPES.BUBBLE])),
   fallback: Object.freeze({ renderer: "data-fallback", status: "warning", reason: "visual renderer not implemented yet" })
 });

@@ -339,32 +339,47 @@ const BUBBLE_A = 0.3014, BUBBLE_B = 0.288;
 export const bubbleRatio = s => BUBBLE_A * s / (1 + BUBBLE_B * s);
 export const bubbleScaleFor = ratio => ratio >= bubbleRatio(3) ? 3 : Math.max(0.01, ratio / (BUBBLE_A - BUBBLE_B * ratio));
 
+/** a packed-bubble chart's plot area, as fractions of the chart (it fills the chart: no axes) */
+const bubbleFrame = spec => ({ x: 0.02, y: 0.03, w: spec.legend ? 0.74 : 0.96, h: 0.94 });
+
 /**
- * Maps and packed bubbles: fixed axis ranges (and the bubble scale) for the plot area's size in px, so
- * map marks keep the geography's shape and packed bubbles touch without overlapping.
+ * Tableau's tooltip on each packed bubble: an invisible circle over it (px inside the chart) whose hyperlink
+ * ScreenTip is the tooltip text, placed with the same fit Excel draws the bubbles at.
+ * @param {ChartSpec} spec @param {{ widthPx: number, heightPx: number }} size @param {string} link
+ */
+export function bubbleTips(spec, size, link) {
+  if (spec.kind !== "bubble" || !spec.packed) return [];
+  const f = bubbleFrame(spec);
+  const plot = { w: size.widthPx * f.w, h: size.heightPx * f.h };
+  const fit = xyFit(spec, plot);
+  if (!fit.unit) return [];
+  return spec.series.flatMap(s => {
+    if (!s.tooltips || !s.size) return [];
+    const max = Math.max(...s.size.filter(v => num(v) !== null && v > 0));
+    return s.size.map((v, i) => {
+      if (!s.tooltips[i] || !(v > 0)) return null;
+      const r = Math.sqrt(v / max) * fit.unit;
+      const cx = size.widthPx * f.x + (s.x[i] - fit.x.min) * fit.unit, cy = size.heightPx * f.y + (fit.y.max - s.y[i]) * fit.unit;
+      return { x: cx - r, y: cy - r, w: 2 * r, h: 2 * r, prst: "ellipse", text: s.tooltips[i], link };
+    }).filter(Boolean);
+  });
+}
+
+/**
+ * Packed bubbles: fixed axis ranges and the bubble scale for the plot area's size in px, so the bubbles touch
+ * without overlapping.
  * @param {ChartSpec} spec @param {{ w: number, h: number } | null} plot
  * @returns {{ bubbleScale: number, unit?: number, x?: { min: number, max: number }, y?: { min: number, max: number } }}
  */
 export function xyFit(spec, plot) {
-  if (!plot || !(spec.packed || spec.aspect)) return { bubbleScale: 100 };
+  if (!plot || !spec.packed) return { bubbleScale: 100 };
   const W = plot.w, H = plot.h, shorter = Math.min(W, H);
-  if (spec.packed) {
-    const b = spec.packed;                                    // radius units: largest bubble radius = 1
-    const want = 0.98 * Math.min(W / b.w, H / b.h);           // px per radius unit that fits the packing
-    const bubbleScale = Math.max(1, Math.round(100 * bubbleScaleFor(2 * want / shorter)));
-    const unit = bubbleRatio(bubbleScale / 100) * shorter / 2;   // px per radius unit as Excel draws it
-    return { bubbleScale, unit, x: { min: b.cx - W / 2 / unit, max: b.cx + W / 2 / unit },
-             y: { min: b.cy - H / 2 / unit, max: b.cy + H / 2 / unit } };
-  }
-  const bubbleScale = Math.max(1, Math.round(100 * bubbleScaleFor(spec.markRatio || 0.1)));
-  const xs = spec.series.flatMap(s => s.x).filter(v => num(v) !== null);
-  const ys = spec.series.flatMap(s => s.y).filter(v => num(v) !== null);
-  const pad = spec.kind === "bubble" ? bubbleRatio(bubbleScale / 100) * shorter / 2 + 4 : 10;   // px around the outer marks
-  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
-  // degrees of latitude per px; a degree of longitude is cos(latitude) as long
-  const k = Math.max((y1 - y0) / Math.max(1, H - 2 * pad), (x1 - x0) * spec.aspect.xScale / Math.max(1, W - 2 * pad), 1e-6);
-  const kx = k / spec.aspect.xScale, cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
-  return { bubbleScale, x: { min: cx - kx * W / 2, max: cx + kx * W / 2 }, y: { min: cy - k * H / 2, max: cy + k * H / 2 } };
+  const b = spec.packed;                                      // radius units: largest bubble radius = 1
+  const want = 0.98 * Math.min(W / b.w, H / b.h);             // px per radius unit that fits the packing
+  const bubbleScale = Math.max(1, Math.round(100 * bubbleScaleFor(2 * want / shorter)));
+  const unit = bubbleRatio(bubbleScale / 100) * shorter / 2;  // px per radius unit as Excel draws it
+  return { bubbleScale, unit, x: { min: b.cx - W / 2 / unit, max: b.cx + W / 2 / unit },
+           y: { min: b.cy - H / 2 / unit, max: b.cy + H / 2 / unit } };
 }
 
 /**
@@ -395,13 +410,25 @@ export function plotAreaXml(spec, refs, plot = null, axisPlot = null) {
   }
   if (k === "scatter" || k === "bubble") {
     const fit = xyFit(spec, plot);
-    const sizes = spec.series.flatMap(s => s.size || []).filter(v => num(v) !== null && v > 0);
-    const maxSize = sizes.length ? Math.max(...sizes) : 1;
-    const charPx = (spec.font && spec.font.size || 9) * 4 / 3 * 0.55;          // average glyph width
-    const tooSmall = s => !spec.packed || !s.labelTexts || !fit.unit ? [] :
-      s.labelTexts.map((t, i) => String(t || "").length * charPx > 1.9 * fit.unit * Math.sqrt(Math.max(0, s.size[i]) / maxSize) ? i : -1)
-        .filter(i => i >= 0);
-    const sers = spec.series.map((s, i) => seriesXml(spec, s, i, refs, k, tooSmall(s))).join("");
+    // packed bubbles: a label is centred on its bubble; with "allow labels to overlap" off (Tableau's default) one
+    // that would overlap a bigger bubble's label is hidden, as Tableau hides it
+    const fontPx = (spec.font && spec.font.size || 9) * 4 / 3, charPx = fontPx * 0.55;
+    const overlapping = s => {
+      if (!spec.packed || !s.labelTexts || !fit.unit || spec.labelCull === false) return [];
+      const boxes = s.labelTexts.map((t, i) => {
+        const lines = String(t || "").split("\n");
+        const w = Math.max(...lines.map(l => l.length)) * charPx, h = lines.length * fontPx * 1.2;
+        const cx = (s.x[i] - fit.x.min) * fit.unit, cy = (fit.y.max - s.y[i]) * fit.unit;
+        return { i, x: cx - w / 2, y: cy - h / 2, w, h, size: s.size[i] || 0 };
+      });
+      const kept = [], hidden = [];
+      boxes.sort((a, b) => b.size - a.size).forEach(b => {
+        const hit = kept.some(o => b.x < o.x + o.w && o.x < b.x + b.w && b.y < o.y + o.h && o.y < b.y + b.h);
+        (hit ? hidden : kept).push(b);
+      });
+      return hidden.map(b => b.i);
+    };
+    const sers = spec.series.map((s, i) => seriesXml(spec, s, i, refs, k, overlapping(s))).join("");
     const group = k === "bubble"
       ? `<c:bubbleChart><c:varyColors val="0"/>${sers}<c:bubbleScale val="${fit.bubbleScale}"/><c:showNegBubbles val="0"/>` +
         `<c:sizeRepresents val="area"/><c:axId val="${AX.cat}"/><c:axId val="${AX.val}"/></c:bubbleChart>`
@@ -493,7 +520,7 @@ export function plotAreaXml(spec, refs, plot = null, axisPlot = null) {
  * @returns {string} */
 export function chartXml(spec, refs, size) {
   // no axes: the plot area fills the frame (room for the legend), so its size in px is known
-  const frame = spec.axesHidden && (spec.packed || spec.aspect) ? { x: 0.02, y: 0.03, w: spec.legend ? 0.74 : 0.96, h: 0.94 } : null;
+  const frame = spec.axesHidden && spec.packed ? bubbleFrame(spec) : null;
   const plot = frame && { w: ((size && size.widthPx) || 600) * frame.w, h: ((size && size.heightPx) || 400) * frame.h };
   const axisPlot = size && size.widthPx ? { w: size.widthPx * 0.85, h: (size.heightPx || 300) * 0.72 } : null;
   const layout = frame

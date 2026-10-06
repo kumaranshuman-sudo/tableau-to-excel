@@ -40,47 +40,6 @@ export function writeIndividualFilterTable(worksheet, filterName, filterValues, 
   return 1 + values.length;
 }
 
-/* ── ExcelJS Cell Styling Functions ───────────────────────────────────── */
-export function setCellValue(worksheet, row, col, value, options = {}) {
-  const cell = worksheet.getCell(row + 1, col + 1);
-  
-  if (typeof value === 'number') {
-    cell.value = value;
-  } else {
-    cell.value = value;
-  }
-  
-  cell.font = {
-    bold: options.bold || false,
-    size: options.size || 11,
-    name: 'Calibri',
-    italic: options.italic || false
-  };
-  
-  if (options.color) {
-    cell.font.color = { argb: options.color };
-  }
-  
-  cell.alignment = {
-    vertical: 'middle',
-    horizontal: options.align || 'left',
-    wrapText: options.wrapText || false
-  };
-  
-  if (options.bgColor) {
-    cell.fill = {
-      type: 'pattern',
-      pattern: 'solid',
-      fgColor: { argb: options.bgColor }
-    };
-  }
-  
-  if (options.border) {
-    cell.border = options.border;
-  }
-}
-
-
 export function writeDashboardTitle(worksheet, dashboardName, originRow, originCol, rangeTracker, titleProps, titleRuns) {
   let r = originRow;
   const C = originCol;

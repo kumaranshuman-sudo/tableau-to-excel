@@ -602,8 +602,7 @@ setTableVisibleRows(placedItems);
           });
           reserveGraphicBlock(item);
           item.visualModel.status = "success";
-          item.visualModel.statusReason = "Tableau SVG rendered and embedded as PNG" +
-            (item.visualModel.type === VISUAL_TYPES.MAP ? " (marks on latitude/longitude, no basemap)" : "");
+          item.visualModel.statusReason = "Tableau SVG rendered and embedded as PNG";
           if (status) {
             status.status = "success";
             status.reason = item.visualModel.statusReason;
@@ -890,6 +889,10 @@ setTableVisibleRows(placedItems);
         job.row = r;
         job.rowOffPx = off;
         job.heightPx = Math.max(20, job.pane === job.panes - 1 ? h - job.pane * paneH : paneH);
+        // packed bubbles: Tableau's tooltip on each bubble (a click follows the link to the chart's own cell)
+        const link = `#'${worksheet.name.replace(/'/g, "''")}'!${worksheet.getCell(job.row + 1, job.col + 1).address}`;
+        const tips = ExcelChartWriter.bubbleTips(job.spec, job, link);
+        if (tips.length) job.tips = tips;
       });
       try {
         buffer = await ExcelChartWriter.injectCharts(buffer, { sheetIndex: 0, charts: [...chartJobs, ...pieChartJobs] });

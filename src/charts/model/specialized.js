@@ -1,10 +1,11 @@
 /* Pie, scatter, waterfall, box plot, Gantt, treemap, symbol map and packed bubble chart specs. */
 import { TV_MAX_POINTS, TV_MAX_SERIES, tvBaseSpec, tvCategories, tvColorScale, tvColorValues, tvHex, tvLabelsOn, tvMarkColor, tvMarkToken, tvMeasureLabel, tvNumFmt, tvPaneLabel, tvPaneRule, tvSum, tvText } from "./common.js";
-import { tfDvNum, tfIsNull } from "../../data/values.js";
+import { tfDvNum, tfDvText, tfIsNull } from "../../data/values.js";
 import { tfFormatNumber } from "../../format/number-format.js";
 import { TABLEAU_10 } from "../../format/palettes.js";
 import { tfSameField } from "../../twb/field-ref.js";
 import { tvPackCircles } from "./packing.js";
+import { renderTemplate } from "./pie.js";
 
 /** @param {ChartContext} ctx @returns {ChartSpec[]} */
 export function tvPieSpec(ctx) {
@@ -379,47 +380,6 @@ export function tvTreemapSpec(ctx) {
   }];
 }
 
-/* ── symbol map: marks on latitude / longitude → bubble chart (Size) or scatter with the axes
- *    hidden and both axes on one scale. No basemap – as the Tableau image renderer drew it ───── */
-/** @param {ChartContext} ctx @returns {ChartSpec[]} */
-export function tvSymbolMapSpec(ctx) {
-  const { vm, roles } = ctx;
-  const lat = vm.cols.findIndex(c => /latitude/i.test(c.name));
-  const lon = vm.cols.findIndex(c => /longitude/i.test(c.name));
-  if (lat < 0 || lon < 0) throw new Error("the map has no latitude/longitude in its summary data");
-  const rows = vm.rows.filter(r => tfDvNum(r[lat]) !== null && tfDvNum(r[lon]) !== null);
-  if (!rows.length) throw new Error("no marks with a latitude and longitude");
-  if (rows.length > TV_MAX_POINTS) throw new Error(`${rows.length} marks – too many for an Excel chart`);
-  const sizeCi = roles.size >= 0 && roles.size !== lat && roles.size !== lon ? roles.size : -1;
-  const scale = tvColorScale(vm, roles, "circle");
-  const colorCi = roles.color && !roles.color.measureNames && roles.color.ci >= 0 ? roles.color.ci : -1;
-  const labelDim = roles.textDims.find(ci => ci !== lat && ci !== lon) ?? -1;
-  const textLabels = labelDim >= 0 && rows.length <= 60;
-  const marks = (name, color, list, pointColors) => ({
-    name, color, x: list.map(r => tfDvNum(r[lon])), y: list.map(r => tfDvNum(r[lat])),
-    size: sizeCi >= 0 ? list.map(r => Math.max(0, tfDvNum(r[sizeCi]) || 0)) : undefined,
-    pointColors, labels: textLabels, labelTexts: textLabels ? list.map(r => tvText(r[labelDim])) : undefined
-  });
-  let series;
-  if (colorCi >= 0 && !roles.color.continuous) {
-    const values = tvColorValues(vm, roles);
-    if (values.length > TV_MAX_SERIES) throw new Error("too many colour values for an Excel chart");
-    series = values.map((v, i) => marks(v, (scale && scale(v)) || tvHex(TABLEAU_10[i % TABLEAU_10.length]),
-      rows.filter(r => tvText(r[colorCi]) === v))).filter(s => s.x.length);
-  } else {
-    series = [marks("Latitude", tvMarkColor(roles), rows,
-      colorCi >= 0 && scale ? rows.map(r => scale(tfDvNum(r[colorCi]))) : undefined)];
-  }
-  const meanLat = Math.max(-85, Math.min(85, rows.reduce((sum, r) => sum + tfDvNum(r[lat]), 0) / rows.length));
-  return [{
-    ...tvBaseSpec(vm), kind: sizeCi >= 0 ? "bubble" : "scatter", gridlines: false, axesHidden: true,
-    legend: series.length > 1, xTitle: "Longitude", numFmt: "General", xNumFmt: "General",
-    sizeTitle: sizeCi >= 0 ? tvMeasureLabel(vm, sizeCi) : undefined, sizeNumFmt: sizeCi >= 0 ? tvNumFmt(vm, sizeCi) : undefined,
-    aspect: { xScale: Math.max(0.2, Math.cos(meanLat * Math.PI / 180)) },
-    markRatio: Math.min(0.12, 0.5 / Math.sqrt(rows.length)), series
-  }];
-}
-
 /* ── packed bubbles: one bubble per mark, area = Size → bubble chart; the bubbles are packed here
  *    (largest in the middle) and scaled to the chart's size when the chart XML is written ──── */
 export const TV_MAX_BUBBLES = 200;
@@ -449,17 +409,36 @@ export function tvPackedBubbleSpec(ctx) {
     const level = dims.indexOf(colorDim);
     pointColors = keep.map((i, k) => scale(cats.levels[level][i]) || tvHex(TABLEAU_10[k % TABLEAU_10.length]));
   }
-  // the label dimension (Label, else Detail, else the innermost level); labels that do not fit are dropped when written
+  // Tableau's label and tooltip per bubble: its template filled with the bubble's values – Tableau's own formatted
+  // value when the bubble is one row, else the rows' sum in the field's format
+  const rowsOf = keep.map(() => /** @type {any[][]} */ ([]));
+  const at = new Map(keep.map((i, k) => [i, k]));
+  vm.rows.forEach(row => { const k = at.get(cats.indexOf(row)); if (k !== undefined) rowsOf[k].push(row); });
+  const valueOf = k => ref => {
+    const ci = vm.cols.findIndex(c => c.ref && tfSameField(c.ref, ref));
+    const rows = rowsOf[k];
+    if (ci < 0 || !rows.length) return "";
+    if (rows.length === 1 || vm.cols[ci].isHeader) return tfDvText(rows[0][ci]);
+    const nums = rows.map(r => tfDvNum(r[ci])).filter(v => v !== null);
+    const nf = vm.fmt.numFmtFor ? vm.fmt.numFmtFor(ref) : null;
+    return nums.length ? (nf ? tfFormatNumber(nums.reduce((a, b) => a + b, 0), nf) : String(nums.reduce((a, b) => a + b, 0))) : "";
+  };
+  const text = lines => lines.map(line => line.map(x => x.text).join("")).join("\n");
+  const labelTpl = vm.fmt.hasModel ? vm.fmt.labelRunsTemplate() : [];
+  const tipTpl = vm.fmt.hasModel ? vm.fmt.tooltipTemplate() : [];
+  // without a label template: the label dimension (Label, else Detail, else the innermost level)
   const labelLevel = dims.indexOf(roles.textDims[0] ?? roles.detailDims[0] ?? dims[dims.length - 1]);
-  const labels = roles.textDims.length > 0 || roles.labelRefs.length > 0;
+  const labels = labelTpl.length ? vm.fmt.markLabelsShown() : roles.textDims.length > 0 || roles.labelRefs.length > 0;
+  const labelTexts = labels ? keep.map((i, k) => labelTpl.length ? text(renderTemplate(labelTpl, valueOf(k))) : cats.levels[labelLevel][i]) : undefined;
+  const tooltips = tipTpl.length ? keep.map((i, k) => text(renderTemplate(tipTpl, valueOf(k)))) : undefined;
   return [{
     ...tvBaseSpec(vm), kind: "bubble", gridlines: false, axesHidden: true, legend: false,
     xTitle: "Bubble x", numFmt: "General", xNumFmt: "General",
     sizeTitle: tvMeasureLabel(vm, roles.size), sizeNumFmt: tvNumFmt(vm, roles.size), packed: box,
     series: [{
       name: "Bubble y", color: tvMarkColor(roles), x: centres.map(p => p.x), y: centres.map(p => p.y),
-      size: keep.map(i => sizes[i]), pointColors, labels,
-      labelTexts: labels ? keep.map(i => cats.levels[labelLevel][i]) : undefined
-    }]
+      size: keep.map(i => sizes[i]), pointColors, labels, labelTexts, tooltips
+    }],
+    labelCull: vm.fmt.hasModel ? vm.fmt.markLabelsCulled() : true
   }];
 }

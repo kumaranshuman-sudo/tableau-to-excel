@@ -396,6 +396,8 @@ interface ChartSeries {
   labelNumFmt?: string;
   /** scatter: "value from cells" label text per point */
   labelTexts?: string[];
+  /** packed bubbles: Tableau's tooltip text per point */
+  tooltips?: string[];
   /** a reference line drawn as a flat line series */
   refLine?: RefLineStyle;
 }
@@ -436,14 +438,10 @@ interface ChartSpec {
   /** bubble size column (data sheet header / number format) */
   sizeTitle?: string;
   sizeNumFmt?: string;
-  /** maps and packed bubbles: no axes, plot area fills the chart */
+  /** packed bubbles: no axes, plot area fills the chart */
   axesHidden?: boolean;
-  /** symbol map: both axes on one scale, x shrunk by cos(latitude) so the geography keeps its shape */
-  aspect?: { xScale: number };
   /** packed bubbles: extent of the packing in radius units (largest bubble radius = 1), centre cx / cy */
   packed?: { w: number; h: number; cx: number; cy: number };
-  /** symbol map: diameter of the largest mark as a share of the plot's shorter side */
-  markRatio?: number;
   /** scatter x axis */
   xNumFmt?: string;
   xTitle?: string;
