@@ -1,6 +1,6 @@
 /* Loading the .twb/.twbx, remembering it (settings + IndexedDB) and the save location. */
 import JSZip from "jszip";
-import { parseTableauFormatting } from "../twb/parser.js";
+import { FORMAT_MODEL_VERSION, parseTableauFormatting } from "../twb/parser.js";
 import { showWorkbookLabel } from "./status.js";
 import { checkWorkbookMatch } from "../visual/workbook-match.js";
 import { extractCustomShapes } from "../export/images.js";
@@ -82,15 +82,33 @@ export async function storeWorkbookHandle(handle) {
 }
 
 /* parsed workbook model: Tableau's extension settings cannot hold a large model
- * (saveAsync fails) and it would be lost on the next reload → keep a copy here too */
-export async function storeFormatModel(fileName, model, titleMap) {
+ * (saveAsync fails) and it would be lost on the next reload → keep a copy here too, with the workbook XML
+ * so a newer version of the extension can parse it again */
+export async function storeFormatModel(fileName, model, titleMap, xml) {
   try {
     const db = await openHandleDb();
     // one entry per workbook file: any dashboard of a workbook loaded once is matched again later
     db.transaction(HANDLE_STORE, "readwrite").objectStore(HANDLE_STORE)
-      .put({ fileName, model, titleMap, savedAt: Date.now() }, "model:" + String(fileName).toLowerCase());
+      .put({ fileName, model, titleMap, xml, savedAt: Date.now() }, "model:" + String(fileName).toLowerCase());
   } catch (e) {
     console.warn("[Workbook] could not keep the workbook formatting in browser storage:", e.message);
+  }
+}
+
+/** a model parsed by an older version of the extension: false = parsed by this one */
+export function isFormatModelStale(model) { return !!model && model.version !== FORMAT_MODEL_VERSION; }
+
+/* a remembered workbook parsed by an older version: parsed again from its XML, and stored again */
+function freshen(rec) {
+  if (!isFormatModelStale(rec.model) || !rec.xml) return rec;
+  try {
+    const model = parseTableauFormatting(rec.xml);
+    console.log(`[Workbook] ${rec.fileName}: formatting read again by this version of the extension`);
+    storeFormatModel(rec.fileName, model, rec.titleMap, rec.xml);
+    return { ...rec, model };
+  } catch (e) {
+    console.warn(`[Workbook] ${rec.fileName}: could not read the stored workbook again:`, e.message);
+    return rec;
   }
 }
 
@@ -104,7 +122,7 @@ export async function restoreFormatModels() {
         const cur = req.result;
         if (!cur) return resolve(out);
         const key = String(cur.key);
-        if ((key.startsWith("model:") || key === "formatModel") && cur.value && cur.value.model) out.push(cur.value);
+        if ((key.startsWith("model:") || key === "formatModel") && cur.value && cur.value.model) out.push(freshen(cur.value));
         cur.continue();
       };
       req.onerror = () => resolve(out);
@@ -276,7 +294,7 @@ export async function readWorkbookFile(file) {
     const formatModel = parseTableauFormatting(xmlString);
     FORMAT_MODEL_CACHE = formatModel;
     FORMAT_MODEL_FILE = file.name;
-    await storeFormatModel(file.name, formatModel, titleMap);
+    await storeFormatModel(file.name, formatModel, titleMap, xmlString);
     // logos: only a .twbx carries the image files; custom shapes (button icons) are inside the workbook XML
     const images = { ...(zip ? await extractWorkbookImages(zip, formatModel) : {}), ...extractCustomShapes(xmlString) };
     IMAGE_CACHE = { file: file.name, images };
@@ -383,11 +401,12 @@ export async function ensureFormatModel() {
   const dashboard = tableau.extensions.dashboardContent.dashboard;
   const rank = m => { const r = checkWorkbookMatch(m, dashboard); return !r ? -1 : r.level === "ok" ? 2 + r.matched : r.level === "partial" ? 1 + r.matched / (r.total || 1) : 0; };
   const current = getFormatModel();
-  if (current && rank(current) >= 2) return current;
+  if (current && !isFormatModelStale(current) && rank(current) >= 2) return current;
   const saved = await restoreFormatModels();
   /** @type {{ model: FormatModel, titleMap?: Record<string, string>, fileName: string } | null} */
   let best = null;
-  let bestRank = current ? rank(current) : 0;
+  // a stale model in memory / settings loses to the same workbook parsed again by this version
+  let bestRank = current ? rank(current) - (isFormatModelStale(current) ? 0.5 : 0) : 0;
   saved.forEach(rec => { const r = rank(rec.model); if (r > bestRank) { best = rec; bestRank = r; } });
   if (best) {
     FORMAT_MODEL_CACHE = best.model;

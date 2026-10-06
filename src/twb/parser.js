@@ -100,6 +100,7 @@ export function tfParseStyle(styleEl) {
     min: tfNum(e.getAttribute("min")),
     max: tfNum(e.getAttribute("max")),
     majorSpacing: tfNum(e.getAttribute("major-spacing")),
+    majorShow: e.getAttribute("major-show") || undefined,      // "false": Edit Axis → Tick Marks → None
     domainExpand: e.getAttribute("domain-expand") || undefined
   }));
   // Shape encodings: value → shape ("Zoom Icons/Zoom in.png" = a custom shape, ":filled/circle" = Tableau's)
@@ -136,11 +137,15 @@ function tfConstantFormula(calc) {
   return m ? Number(m[1] ?? m[2]) : undefined;
 }
 
+/* Raise when the parser reads something new: a workbook model remembered by an older version is then
+   parsed again from its stored XML (ui/workbook-store.js), so an update reaches workbooks loaded before it. */
+export const FORMAT_MODEL_VERSION = 3;
+
 /** @param {string} xmlString the .twb XML @returns {FormatModel} */
 export function parseTableauFormatting(xmlString) {
   const doc = new DOMParser().parseFromString(xmlString, "text/xml");
   const root = doc.documentElement;
-  const model = { version: 2, workbookStyle: tfParseStyle(tfKid(root, "style")),
+  const model = { version: FORMAT_MODEL_VERSION, workbookStyle: tfParseStyle(tfKid(root, "style")),
                   fields: {}, datasourceStyles: {}, sheets: {}, dashboards: {}, measureAliases: {} };
 
   // ── datasource columns: captions, roles, default number formats, colour maps

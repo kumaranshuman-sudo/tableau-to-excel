@@ -70,13 +70,16 @@ export function tvApplyWorkbookAxes(spec, ctx) {
   const catShelf = valueShelf === "rows" ? "cols" : "rows";
   const refs = roles[valueShelf].axisRefs.length ? roles[valueShelf].axisRefs : roles[valueShelf].values.map(v => v.ref);
   const primary = refs[0] ? fmt.axisInfo(refs[0], valueShelf, "0") : {};
-  if (primary.hidden) spec.valueAxisHidden = true;
+  // Tick Marks: None leaves an axis with no labels – Tableau shows nothing there
+  const noTicks = (ref, cls) => fmt.axisSpace(ref, valueShelf, cls).majorShow === "false";
+  if (primary.hidden || (refs[0] && noTicks(refs[0], "0"))) spec.valueAxisHidden = true;
   if (primary.title !== undefined) spec.valueTitle = primary.title;
   if (refs[1] && spec.series.some(s => s.secondary)) {
     // class = which axis of that field: a second measure has its own first axis ("0"); the same field on
     // both axes has its second one ("1")
-    const second = fmt.axisInfo(refs[1], valueShelf, tfSameField(refs[0], refs[1]) ? "1" : "0");
-    if (second.hidden) spec.secondaryAxisHidden = true;
+    const cls = tfSameField(refs[0], refs[1]) ? "1" : "0";
+    const second = fmt.axisInfo(refs[1], valueShelf, cls);
+    if (second.hidden || noTicks(refs[1], cls)) spec.secondaryAxisHidden = true;
     if (second.title !== undefined) spec.secondaryTitle = second.title;
   }
   if (!fmt.gridlinesShown(valueShelf)) spec.gridlines = false;
