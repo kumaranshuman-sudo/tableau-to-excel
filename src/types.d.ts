@@ -579,6 +579,10 @@ interface ExportItem {
   kpiCard?: import("./export/kpi-card.js").KpiCard | null;
   /** relative widths of the columns the block needs in its zone (table fields, KPI tiles) */
   split?: number[];
+  /** a split block's part boundaries: the column (from its first) where each next part starts */
+  splitCuts?: number[] | null;
+  /** a table's fields on the grid: each one's first column (from the table's first) and how many it spans */
+  fieldCols?: { offset: number; span: number }[] | null;
   /** a table's column widths in px (Tableau's own, else from its content) */
   splitPx?: number[];
   /** dashboard image object (logo, icon) with its own zone */

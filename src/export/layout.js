@@ -41,11 +41,13 @@ export const EDGE_MERGE_PX = 6;
 /**
  * Excel columns from the dashboard's own zone edges: every left / right edge of a laid-out block is a column
  * boundary, so each column is as wide (px) as the gap between two edges and every block spans exactly its
- * zone – positions and widths as on the dashboard, whatever the content. A table zone gets one column per
- * field: at the widths the table draws (splitPx, from the zone's left edge; running into free space beside
- * the zone, and scaled down only when that is not enough), else split by relative widths.
+ * zone – positions and widths as on the dashboard, whatever the content. A table's fields get their boundaries
+ * at the widths the table draws (splitPx, from the zone's left edge; running into free space beside the zone,
+ * and scaled down only when that is not enough); KPI tiles split their zone (split). A field or tile crossed by
+ * another block's edge spans several columns.
  * @param {{ layout?: any, split?: number[], splitPx?: number[] }[]} items
- * @returns {{ colPx: number[], span: (item: any) => { gridCol: number, gridW: number } | null }}
+ * @returns {{ colPx: number[], span: (item: any) => { gridCol: number, gridW: number, cuts: number[] | null,
+ *   fields: { offset: number, span: number }[] | null } | null }}
  */
 export function buildColumnGrid(items) {
   const laid = items.filter(it => it.layout && typeof it.layout.xPx === "number" && it.layout.widthPx > 0);
@@ -60,73 +62,67 @@ export function buildColumnGrid(items) {
   let edges = merge(laid.flatMap(sideOf));
   const nearest = v => edges.reduce((best, e, i) => Math.abs(e - v) < Math.abs(edges[best] - v) ? i : best, 0);
   const extra = [];
-  // tables starting at the same left edge (stacked tables) share their columns, each as wide as the widest
-  // of them at that position – a column per field that fits every table's values
-  /** @type {Map<number, { R: number, widths: number[], area: number, members: any[] }>} */
-  const stacks = new Map();
-  laid.forEach(it => {
-    if (!it.splitPx || !it.splitPx.length) return;
-    const [l, r] = sideOf(it), L = edges[nearest(l)], R = edges[nearest(r)];
-    const s = stacks.get(L) || { R, widths: [], area: 0, members: [] };
-    s.R = Math.max(s.R, R);
-    s.area += it.layout.widthPx * (it.layout.heightPx || 1);
-    s.members.push(it);
-    it.splitPx.forEach((w, i) => { s.widths[i] = Math.max(s.widths[i] || 0, w); });
-    stacks.set(L, s);
-  });
   const rowsOverlap = (a, b) => a.layout.yPx < b.layout.yPx + (b.layout.heightPx || 0) - 2 &&
                                 b.layout.yPx < a.layout.yPx + (a.layout.heightPx || 0) - 2;
   /* how far a table may run to the right: up to the next block beside it (sharing its rows) – a table's
-     columns keep their widths as long as there is room, like the backup's, instead of being squeezed */
-  const roomRight = (R, members) => {
+     columns keep their widths as long as there is room, instead of being squeezed */
+  const roomRight = (R, it) => {
     let limit = Infinity;
     laid.forEach(o => {
-      if (members.includes(o)) return;
+      if (o === it) return;
       const [l] = sideOf(o);
-      if (l >= R - EDGE_MERGE_PX && members.some(m => rowsOverlap(m, o))) limit = Math.min(limit, Math.max(R, l));
+      if (l >= R - EDGE_MERGE_PX && rowsOverlap(it, o)) limit = Math.min(limit, Math.max(R, l));
     });
     return limit;
   };
-  // one sheet, one set of columns: where tables overlap horizontally the larger one keeps its columns, and a
-  // smaller table inside its span writes into those columns rather than cutting them
-  /** @type {[number, number[]][]} a table stack's left edge and its own column edges */
-  const tables = [];
-  [...stacks.entries()].sort((a, b) => b[1].area - a[1].area).forEach(([L, { R, widths, members }]) => {
-    const total = widths.reduce((a, b) => a + b, 0);
-    const room = roomRight(R, members) - L;                            // squeezed only when that is not enough
+  // A table's field boundaries are column edges too. Every block keeps its own edges: where another block's
+  // edge falls inside a field, the field spans both columns (merged cells), so tables, KPI tiles and charts all
+  // keep their exact widths on one shared set of columns.
+  /** @type {Map<any, number[]>} */
+  const fieldEdges = new Map();
+  laid.forEach(it => {
+    if (!it.splitPx || !it.splitPx.length) return;
+    const [l, r] = sideOf(it), L = edges[nearest(l)], R = edges[nearest(r)];
+    const total = it.splitPx.reduce((a, b) => a + b, 0);
+    const room = roomRight(R, it) - L;                                  // squeezed only when that is not enough
     const k = total > room ? room / total : 1;
     let at = L;
     const own = [L];
-    widths.forEach(w => { at += w * k; own.push(Math.round(at)); });
-    const free = own.filter(e => !tables.some(([L2, o2]) => e > L2 + 2 && e < o2[o2.length - 1] - 2 && !o2.some(x => Math.abs(x - e) <= 2)));
-    if (free.length < 2) return;                                        // entirely inside a larger table
-    extra.push(...free);
-    tables.push([free[0], free]);
+    it.splitPx.forEach(w => { at += w * k; own.push(Math.round(at)); });
+    extra.push(...own);
+    fieldEdges.set(it, own);
   });
+  // KPI tiles: Tableau gives each the same share of the zone – their boundaries are column edges, whatever other
+  // blocks' edges fall in between (a tile then spans several columns)
+  /** @type {Map<any, number[]>} */
+  const splitCuts = new Map();
   laid.forEach(it => {
     if (it.splitPx && it.splitPx.length) return;
     if (!it.split || it.split.length < 2) return;
     const [l, r] = sideOf(it), L = edges[nearest(l)], R = edges[nearest(r)];
-    if (edges.filter(e => e > L && e < R).length + 1 >= it.split.length) return;
     const total = it.split.reduce((a, b) => a + b, 0);
     let at = L;
-    it.split.slice(0, -1).forEach(w => { at += (R - L) * w / total; extra.push(Math.round(at)); });
+    const cuts = it.split.slice(0, -1).map(w => { at += (R - L) * w / total; return Math.round(at); });
+    extra.push(...cuts);
+    splitCuts.set(it, cuts);
   });
   edges = merge([...edges, ...extra], 2);
-  // inside a table only table column edges: another block's edge there would cut a field's column in two
-  // (a table's own edges are never dropped for another table's)
-  const tableEdges = tables.flatMap(([, own]) => own);
-  tables.forEach(([L, own]) => {
-    const end = own[own.length - 1];
-    edges = edges.filter(e => e <= L || e >= end || tableEdges.some(o => Math.abs(o - e) <= 2));
-  });
   const colPx = edges.slice(1).map((e, i) => e - edges[i]);
   return {
     colPx,
     span: it => {
       if (!laid.includes(it)) return null;
       const [l, r] = sideOf(it), a = nearest(l), b = nearest(r);
-      return { gridCol: a, gridW: Math.max(1, b - a) };
+      // split blocks: the column (from the block's first) where each next part starts
+      const cuts = splitCuts.has(it) ? splitCuts.get(it).map(e => nearest(e) - a) : null;
+      // tables: each field's first column (from the block's first) and how many columns it spans
+      let fields = null;
+      if (fieldEdges.has(it)) {
+        const idx = fieldEdges.get(it).map(nearest);
+        fields = idx.slice(0, -1).map((c, k) => ({ offset: c - idx[0], span: Math.max(1, idx[k + 1] - c) }));
+        fields.forEach((f, k) => { if (k && f.offset < fields[k - 1].offset + fields[k - 1].span) f.offset = fields[k - 1].offset + fields[k - 1].span; });
+      }
+      return { gridCol: a, gridW: Math.max(1, b - a), cuts, fields };
     }
   };
 }
