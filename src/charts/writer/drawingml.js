@@ -265,7 +265,7 @@ export function seriesXml(spec, s, k, refs, type, hiddenLabels) {
     labelRangeXml(s, r) + `</c:ser>`;
 }
 
-/** @param {ChartSpec} spec @param {number} id @param {number} cross @param {{ deleted?: boolean }} [o] */
+/** @param {ChartSpec} spec @param {number} id @param {number} cross @param {{ deleted?: boolean, rot?: number }} [o] rot: label rotation (60000ths of a degree) */
 export function catAxis(spec, id, cross, o = {}) {
   const horizontal = spec.barDir === "bar";
   const multi = spec.categories && spec.categories.levels.length > 1;
@@ -273,7 +273,7 @@ export function catAxis(spec, id, cross, o = {}) {
     `<c:delete val="${o.deleted ? 1 : 0}"/><c:axPos val="${horizontal ? "l" : "b"}"/>` +
     `${o.deleted ? "" : title(spec.categoryTitle, spec.font, horizontal)}` +
     `<c:numFmt formatCode="General" sourceLinked="1"/><c:majorTickMark val="none"/><c:minorTickMark val="none"/>` +
-    `<c:tickLblPos val="${o.deleted ? "none" : "low"}"/><c:spPr>${spec.axisLine === false ? "<a:ln><a:noFill/></a:ln>" : line("D4D4D4", 9525)}</c:spPr>${txPr(spec.font)}` +
+    `<c:tickLblPos val="${o.deleted ? "none" : "low"}"/><c:spPr>${spec.axisLine === false ? "<a:ln><a:noFill/></a:ln>" : line("D4D4D4", 9525)}</c:spPr>${txPr(spec.font, { rot: o.rot })}` +
     `<c:crossAx val="${cross}"/><c:crosses val="autoZero"/><c:auto val="1"/><c:lblAlgn val="ctr"/>` +
     `<c:lblOffset val="100"/><c:noMultiLvlLbl val="${multi ? 0 : 1}"/></c:catAx>`;
 }
@@ -455,7 +455,12 @@ export function plotAreaXml(spec, refs, plot = null, axisPlot = null) {
       `<c:axId val="${AX.x2}"/><c:axId val="${AX.y2}"/></c:scatterChart>`;
     overlayAxes = hiddenValAx(AX.x2, AX.y2, "t", fixed.min, fixed.max) + hiddenValAx(AX.y2, AX.x2, "r", 0, 1);
   }
-  let axes = catAxis(spec, AX.cat, AX.val, { deleted: spec.categoryAxisHidden }) +
+  // category labels that don't fit across their slot stand upright, as Tableau turns its column headers
+  const cats = spec.categories ? spec.categories.levels[0] : [];
+  const fontPx = ((spec.font && spec.font.size) || 9) * 4 / 3;
+  const longest = Math.max(0, ...cats.map(c => String(c == null ? "" : c).length));
+  const upright = spec.barDir !== "bar" && axisPlot && cats.length && longest * fontPx * 0.55 > axisPlot.w / cats.length;
+  let axes = catAxis(spec, AX.cat, AX.val, { deleted: spec.categoryAxisHidden, rot: upright ? -5400000 : 0 }) +
     valAxis(spec, AX.val, AX.cat, { title: spec.valueAxisHidden ? null : spec.valueTitle, numFmt: spec.numFmt, values: axisValues(false),
                                     fixed, deleted: spec.valueAxisHidden, majorUnit: unit, tickFmt: spec.valueAxisNumFmt });
   if (hasSecondary) {

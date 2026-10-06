@@ -72,6 +72,8 @@ interface AxisSpace {
   min?: number;
   max?: number;
   majorSpacing?: number;
+  /** "false" = Tick Marks: None – no ticks and no tick labels: the axis shows nothing */
+  majorShow?: string;
   /** "false" = the axis does not extend to zero */
   domainExpand?: string;
 }

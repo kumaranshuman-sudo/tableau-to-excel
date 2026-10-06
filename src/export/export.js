@@ -15,7 +15,7 @@ import { tfCollect, tfDashboardShading, tfMerge } from "../twb/formatter.js";
 import { tfParseFieldRef, tfSameField } from "../twb/field-ref.js";
 import { backgroundPlan } from "./backgrounds.js";
 import { appendExportStatus, setExportStatus, updateVisualStatus } from "../ui/status.js";
-import { chooseSaveTarget, ensureFormatModel, formatModelFileName, getTitleMap, getWorkbookImages } from "../ui/workbook-store.js";
+import { chooseSaveTarget, ensureFormatModel, formatModelFileName, getTitleMap, getWorkbookImages, isFormatModelStale } from "../ui/workbook-store.js";
 import { classifyImageObjects, fitImage, imageInfo, nativeAnchor, prepareImage, webLink } from "./images.js";
 import { tvIconSheet } from "../visual/icon-sheet.js";
 import { isKPIViewModel } from "../visual/classify.js";
@@ -54,7 +54,9 @@ export async function exportToExcel() {
 
     const fmtModel = await ensureFormatModel();
     console.log(`[Export] Format model: ${fmtModel ? Object.keys(fmtModel.sheets).length + " sheets" : "none – load the workbook for exact formatting"}`);
-    const workbookWarning = fmtModel ? describeWorkbookMatch(checkWorkbookMatch(fmtModel, dashboard))
+    const workbookWarning = fmtModel && isFormatModelStale(fmtModel)
+      ? "⚠ The workbook was loaded with an older version of the extension – click 📁 Load Workbook once more for the latest formatting"
+      : fmtModel ? describeWorkbookMatch(checkWorkbookMatch(fmtModel, dashboard))
       : "⚠ Workbook not loaded – charts can only be recognised from the workbook, so they may be exported as tables. Click 📁 Load Workbook, then export again";
     if (workbookWarning) console.warn("[Export]", workbookWarning);
 
@@ -254,9 +256,10 @@ export async function exportToExcel() {
           console.warn(`[Export] Skipping "${sheet.name}": no renderable rows or columns after fallback`);
           continue;
         }
-        // a chart exported as data: axis/colour/detail fields are the data – show every column
+        // a chart exported as data: axis/colour/detail fields are the data – show every column, except the
+        // latitude / longitude Tableau generates only to place a map's marks
         if (visualModel.renderer === "data-fallback" && !VISUAL_RENDERERS.cellTypes.has(visualModel.type)) {
-          vm.order = vm.cols.map((_, i) => i);
+          vm.order = vm.cols.map((_, i) => i).filter(i => !/^(latitude|longitude) \(generated\)$/i.test(vm.cols[i].name));
           vm.cols.forEach(c => { if (!c.label) c.label = c.name; });
           vm.showHeaderRow = true;
         }

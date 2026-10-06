@@ -9,7 +9,8 @@ async function worker() {
     const sheet = queue.shift();
     try {
       const [dataResult, visualSpecResult] = await Promise.allSettled([
-        sheet.getSummaryDataAsync(),
+        // every mark, not only the selected ones: with a mark selected Tableau returns just that mark otherwise
+        sheet.getSummaryDataAsync({ ignoreSelection: true }),
         typeof sheet.getVisualSpecificationAsync === "function"
           ? sheet.getVisualSpecificationAsync()
           : Promise.reject(new Error("getVisualSpecificationAsync is unavailable"))

@@ -433,10 +433,12 @@ export function buildPieCharts(pie, block, paneRefs, o) {
   const pw = pie.stretch.w ? fitW : Math.min(PIE_CELL_PX, fitW);
   const ph = pie.stretch.h ? fitH : Math.min(PIE_CELL_PX, fitH);
   const textScale = FORMAT_CONFIG.tableauTextScale || (typeof window !== "undefined" && window.devicePixelRatio) || 1;
-  // Tableau clips an oversized pie to its cell; Excel can't clip, so it fills the cell instead
-  const D = Math.min(pieDiameterPx(pie.markSize), pw, ph);
-  const holeD = pie.hole ? Math.min(pieDiameterPx(pie.hole.markSize), D) : 0;
-  const innerD = pie.inner ? Math.min(pieDiameterPx(pie.inner.markSize), D) : 0;
+  // Tableau clips an oversized pie to its cell; Excel can't clip, so it fills the cell instead – and the hole /
+  // inner ring shrink with it, so the ring keeps Tableau's proportions
+  const full = pieDiameterPx(pie.markSize);
+  const D = Math.min(full, pw, ph), k = D / full;
+  const holeD = pie.hole ? Math.min(pieDiameterPx(pie.hole.markSize) * k, D) : 0;
+  const innerD = pie.inner ? Math.min(pieDiameterPx(pie.inner.markSize) * k, D) : 0;
   const single = pie.rowKeys.length * pie.colKeys.length === 1;
   const labelsOf = (pts, R, cull) => {
     const boxes = pieLabelLayout(pts, { cx: pw / 2, cy: ph / 2, R, w: pw, h: ph, cull, textScale });
