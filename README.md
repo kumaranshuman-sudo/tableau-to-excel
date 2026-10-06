@@ -1,7 +1,55 @@
 # Mark2Table / Export2Sheet
 
-Tableau dashboard extension that exports a dashboard to a formatted Excel workbook: tables and KPIs
-as styled cells, charts as native (editable) Excel charts, the rest as Tableau-drawn images or data.
+> Tableau dashboard extension that converts dashboards into editable, formatted Excel workbooks.
+
+[![Repository](https://img.shields.io/badge/GitHub-kumaranshuman--sudo-181717?style=flat-square&logo=github)](https://github.com/kumaranshuman-sudo/tableau-to-excel)
+[![Runtime](https://img.shields.io/badge/Runtime-Tableau%20Desktop-1C1C1C?style=flat-square)](https://www.tableau.com/products/desktop)
+[![Build](https://img.shields.io/badge/Build-esbuild-FFCF00?style=flat-square)](https://esbuild.github.io/)
+
+## What it solves
+
+Tableau dashboards are optimized for interactive analysis, while Excel is often still required for downstream editing, reporting, and distribution. Mark2Table bridges that gap by exporting dashboard content into a workbook while preserving as much semantic and visual structure as possible: each object at its dashboard position, with Tableau's fonts, colours and number formats.
+
+The exporter chooses the appropriate representation per visual:
+
+- **Tables / KPIs** → formatted Excel cells (including tables built from marks: fills, arrows, data bars)
+- **Supported charts** → native, editable Excel charts
+- **Pies and donuts** → native charts with Tableau's labels, donut hole and tooltips on hover
+- **Unsupported or Tableau-rendered visuals** → images or extracted data
+- **Dashboard formatting** → palettes, number formats, layout and workbook-derived styling
+
+## Architecture
+
+```text
+Tableau Dashboard
+       │
+       ▼
+Tableau Extensions API
+       │
+       ├── Workbook / TWB / TWBX parser
+       │        └── formatting cascade + assets
+       │
+       ├── Dashboard data extraction
+       │
+       ▼
+Visual classification
+       │
+       ▼
+Renderer-neutral chart model
+       │
+       ├── Cell writer ───────────────► XLSX cells
+       ├── Chart writer ──────────────► Native Excel charts
+       └── Image/data fallback ───────► XLSX assets / data
+```
+
+## Engineering highlights
+
+- **TWB/TWBX parsing:** reads workbook metadata and formatting rules rather than treating the dashboard as a screenshot.
+- **Renderer-neutral chart model:** separates Tableau visual interpretation from Excel DrawingML generation.
+- **Native chart generation:** supported visuals become editable Excel charts.
+- **Formatting pipeline:** palettes, number formats, dimensions and workbook styles are resolved before writing.
+- **Local dependency bundling:** ExcelJS and JSZip are bundled into the extension; runtime CDN dependencies are avoided.
+- **Type checking:** JSDoc-based checks validate shared shapes in `src/types.d.ts`.
 
 ## Setup
 

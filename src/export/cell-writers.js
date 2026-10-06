@@ -80,63 +80,8 @@ export function setCellValue(worksheet, row, col, value, options = {}) {
   }
 }
 
-export const thinBorder = {
-  top: { style: 'thin' },
-  left: { style: 'thin' },
-  bottom: { style: 'thin' },
-  right: { style: 'thin' }
-};
 
-export const thickBorder = {
-  top: { style: 'medium' },
-  left: { style: 'medium' },
-  bottom: { style: 'medium' },
-  right: { style: 'medium' }
-};
-
-export function subtitleCell(worksheet, row, col, value) {
-  setCellValue(worksheet, row, col, value, {
-    bold: false,
-    size: 11,
-    color: "FF666666",
-    align: "center"
-  });
-}
-
-export function titleCell(worksheet, row, col, value) {
-  setCellValue(worksheet, row, col, value, {
-    bold: true,
-    size: 12,
-    bgColor: "FFE8F0FE",
-    align: "center",
-    border: thickBorder
-  });
-}
-
-export function tableHeaderCell(worksheet, row, col, value) {
-  setCellValue(worksheet, row, col, value, {
-    bold: true,
-    size: 11,
-    bgColor: "FF1A73E8",
-    color: "FFFFFFFF",
-    align: "center",
-    border: thinBorder,
-    wrapText: true
-  });
-}
-
-export function tableDataCell(worksheet, row, col, value, rowIndex = 0) {
-  const bgColor = (rowIndex % 2 === 0) ? null : "FFF9F9F9";
-  setCellValue(worksheet, row, col, value, {
-    align: "left",
-    size: 11,
-    bgColor: bgColor,
-    border: thinBorder,
-    wrapText: true
-  });
-}
-
-export function writeDashboardTitle(worksheet, dashboardName, exportDate, originRow, originCol, rangeTracker, titleProps, titleRuns) {
+export function writeDashboardTitle(worksheet, dashboardName, originRow, originCol, rangeTracker, titleProps, titleRuns) {
   let r = originRow;
   const C = originCol;
   const p = titleProps || tfMerge(TABLEAU_DEFAULTS.dashTitle);
