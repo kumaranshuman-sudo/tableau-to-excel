@@ -496,7 +496,6 @@ setTableVisibleRows(placedItems);
 
     let currentRow = 0;
     const dashboardName = dashboard.name || "Dashboard Export";
-    const exportDate = new Date().toLocaleString();
     let dashTitleProps = null;
     const dashFmt = fmtModel && fmtModel.dashboards && fmtModel.dashboards[dashboard.name];
     if (dashFmt) {
@@ -508,7 +507,7 @@ setTableVisibleRows(placedItems);
     const titleRuns = tfDashboardTitleRuns(fmtModel, dashboard.name, usedZones);
     // Tableau shows the dashboard title only when its title zone is on (text boxes are drawn in place)
     const titleShown = !dashFmt || dashFmt.zones.some(z => z.type === "title" && !z.hidden);
-    const titleHeight = writeDashboardTitle(worksheet, titleShown ? dashboardName : "", exportDate, currentRow, 0, tracker, dashTitleProps,
+    const titleHeight = writeDashboardTitle(worksheet, titleShown ? dashboardName : "", currentRow, 0, tracker, dashTitleProps,
       titleShown ? titleRuns : null);
     currentRow += titleHeight;
 

@@ -31,6 +31,7 @@ export function tfFormatsToProps(m) {
   if (m["display"]) p.display = m["display"] !== "false";
   if (m["display-field-labels"]) p.displayFieldLabels = m["display-field-labels"] !== "false";
   if (m["height"]) p.height = tfNum(m["height"]);
+  if (m["text-orientation"] != null) p.textOrientation = tfNum(m["text-orientation"]);
   return p;
 }
 
@@ -177,6 +178,15 @@ export function createSheetFormatter(model, sheetName, onlyPanes) {
         tfCollect(st, TF_ELEMENTS.header, { field: ref, scope: "rows" }));
       p.numFmt = numFmt(ref, true);
       return p;
+    },
+
+    /** a header's text orientation in degrees (-90 = rotated up), null when Tableau's default (horizontal)
+     * @param {FieldRef} ref */
+    headerOrientation(ref) {
+      if (!ref) return null;
+      const p = tfMerge(tfCollect(wb, ["label"], { field: ref }), tfCollect(st, ["label"], { field: ref }),
+        tfCollect(st, ["label"], { field: ref, scope: "cols" }), tfCollect(st, ["label"], { field: ref, scope: "rows" }));
+      return typeof p.textOrientation === "number" ? p.textOrientation : null;
     },
 
     /* measure values (text marks in Tableau) */

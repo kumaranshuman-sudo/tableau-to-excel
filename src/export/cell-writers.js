@@ -80,16 +80,8 @@ export function setCellValue(worksheet, row, col, value, options = {}) {
   }
 }
 
-export function subtitleCell(worksheet, row, col, value) {
-  setCellValue(worksheet, row, col, value, {
-    bold: false,
-    size: 11,
-    color: "FF666666",
-    align: "center"
-  });
-}
 
-export function writeDashboardTitle(worksheet, dashboardName, exportDate, originRow, originCol, rangeTracker, titleProps, titleRuns) {
+export function writeDashboardTitle(worksheet, dashboardName, originRow, originCol, rangeTracker, titleProps, titleRuns) {
   let r = originRow;
   const C = originCol;
   const p = titleProps || tfMerge(TABLEAU_DEFAULTS.dashTitle);
@@ -108,13 +100,6 @@ export function writeDashboardTitle(worksheet, dashboardName, exportDate, origin
     lineSizes.push(cur);
     worksheet.getRow(r + 1).height = Math.ceil(lineSizes.reduce((a, b) => a + (b || 9) * 1.3, 0) + 4);
   }
-  rangeTracker.update(r, C);
-  rangeTracker.update(r, C + 4);
-  r++;
-
-  subtitleCell(worksheet, r, C, `Exported on: ${exportDate}`);
-  worksheet.getCell(r + 1, C + 1).font = { name: tfExcelFont(p).name, size: 9, color: { argb: "FF888888" } };
-  worksheet.mergeCells(r + 1, C + 1, r + 1, C + 5);
   rangeTracker.update(r, C);
   rangeTracker.update(r, C + 4);
   r++;

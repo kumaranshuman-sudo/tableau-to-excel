@@ -455,6 +455,10 @@ interface ChartSpec {
   valueAxisHidden?: boolean;
   /** the worksheet hides these axes / lines (Show Header off, Format → Lines) */
   categoryAxisHidden?: boolean;
+  /** category labels' rotation in degrees (Tableau's header text orientation), 0 = horizontal */
+  categoryRotation?: number;
+  /** category labels shown on the axis (names cut short like Tableau's headers), set by the writer */
+  categoryShown?: string[] | null;
   secondaryAxisHidden?: boolean;
   xAxisHidden?: boolean;
   /** scatter: grid lines along the x axis */

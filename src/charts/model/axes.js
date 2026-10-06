@@ -91,5 +91,9 @@ export function tvApplyWorkbookAxes(spec, ctx) {
   const dims = [...roles[valueShelf].dims.map(d => ({ d, shelf: valueShelf })), ...roles[catShelf].dims.map(d => ({ d, shelf: catShelf }))];
   const hidden = ({ d, shelf }) => !!d.ref && (d.continuous ? fmt.axisInfo(d.ref, shelf, "0").hidden === true : fmt.isLabelHidden(d.ref));
   if (dims.length && dims.every(hidden)) spec.categoryAxisHidden = true;
+  // category labels: horizontal like Tableau's column headers, unless the header is rotated in the workbook
+  const inner = roles[catShelf].dims.filter(d => d.ref && !d.continuous).slice(-1)[0];
+  const rot = inner ? fmt.headerOrientation(inner.ref) : null;
+  spec.categoryRotation = rot || 0;
   if (!fmt.axisLineShown(catShelf)) spec.axisLine = false;
 }
