@@ -475,7 +475,7 @@ export function plotAreaXml(spec, refs, plot = null, axisPlot = null) {
       `<c:axId val="${AX.x2}"/><c:axId val="${AX.y2}"/></c:scatterChart>`;
     overlayAxes = hiddenValAx(AX.x2, AX.y2, "t", fixed.min, fixed.max) + hiddenValAx(AX.y2, AX.x2, "r", 0, 1);
   }
-  let axes = catAxis(spec, AX.cat, AX.val, { deleted: spec.categoryAxisHidden, rot: (spec.categoryRotation || 0) * 60000 }) +
+  let axes = catAxis(spec, AX.cat, AX.val, { deleted: spec.categoryAxisHidden }) +
     valAxis(spec, AX.val, AX.cat, { title: spec.valueAxisHidden ? null : spec.valueTitle, numFmt: spec.numFmt, values: axisValues(false),
                                     fixed, deleted: spec.valueAxisHidden, majorUnit: unit, tickFmt: spec.valueAxisNumFmt });
   if (hasSecondary) {
