@@ -97,9 +97,10 @@ export function buildMarkPlan(fmt, cols, rows, order) {
  * leftwards from its right edge.
  * @param {import("exceljs").Worksheet} worksheet @param {Map<number, MarkColumn>} plan
  * @param {ViewColumn[]} cols @param {any[][]} rows @param {number[]} order
- * @param {number} firstRow 0-based sheet row of the first data row @param {number} C 0-based first column
+ * @param {number} firstRow 0-based sheet row of the first data row
+ * @param {(k: number) => number} colAt 0-based sheet column of the table's k-th field
  */
-export function writeMarkBars(worksheet, plan, cols, rows, order, firstRow, C) {
+export function writeMarkBars(worksheet, plan, cols, rows, order, firstRow, colAt) {
   const bars = order.map((ci, k) => ({ ci, k, m: plan.get(ci) })).filter(x => x.m && x.m.kind === "bar");
   /** @type {Map<string, number>} */
   const maxOf = new Map();
@@ -115,7 +116,7 @@ export function writeMarkBars(worksheet, plan, cols, rows, order, firstRow, C) {
     const cfvo = negative ? [{ type: "num", value: -M }, { type: "num", value: 0 }] : [{ type: "num", value: 0 }, { type: "num", value: M }];
     const rule = argb => ({ type: "dataBar", gradient: false, border: false, minLength: 0, maxLength: 100, cfvo,
       color: { argb }, negativeFillColor: { argb }, negativeBarColorSameAsPositive: true, axisPosition: "auto" });
-    const addr = i => worksheet.getCell(firstRow + i + 1, C + k + 1).address;
+    const addr = i => worksheet.getCell(firstRow + i + 1, colAt(k) + 1).address;
     const colors = values.map((v, i) => v === null ? null : m.colorAt(i));
     const one = colors.filter(Boolean);
     if (one.length && one.every(x => x === one[0])) {

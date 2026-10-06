@@ -158,8 +158,9 @@ function textOf(s, vm) { return s.ci !== undefined ? tfDvText(vm.rows[0][s.ci]) 
  * @param {import("exceljs").Worksheet} worksheet @param {KpiCard} card @param {ViewModel | null} vm null for a text box
  * @param {number} originRow @param {number} originCol @param {number} gridW
  * @param {{ update(r: number, c: number): void }} rangeTracker @param {Record<number, number>} colWidths
+ * @param {number[] | null} [cuts] the column (from originCol) where each next tile starts – equal shares of the zone
  */
-export function writeKpiCard(worksheet, card, vm, originRow, originCol, gridW, rangeTracker, colWidths) {
+export function writeKpiCard(worksheet, card, vm, originRow, originCol, gridW, rangeTracker, colWidths, cuts = null) {
   let r = originRow;
   const C = originCol;
   if (card.title) {
@@ -181,8 +182,11 @@ export function writeKpiCard(worksheet, card, vm, originRow, originCol, gridW, r
   const plan = vm ? buildColorPlan(vm.fmt, vm.cols, vm.rows) : null;
   const n = card.tiles.length;
   const span = Math.max(1, Math.floor(gridW / n));
+  // the tile's columns: between its boundaries on the grid (equal shares of the zone), else an equal count
+  const byCuts = cuts && cuts.length === n - 1 && cuts.every((c, i) => c > (i ? cuts[i - 1] : 0) && c < gridW);
   card.tiles.forEach((tile, k) => {
-    const c0 = C + k * span, c1 = k === n - 1 ? C + gridW - 1 : c0 + span - 1;
+    const c0 = byCuts ? C + (k ? cuts[k - 1] : 0) : C + k * span;
+    const c1 = byCuts ? C + (k < n - 1 ? cuts[k] : gridW) - 1 : k === n - 1 ? C + gridW - 1 : c0 + span - 1;
     // as wide as the tile's zone (and never narrower than its text); Excel width units ≈ 7 px
     const tilePx = Math.max(card.widthPx[k], card.zoneWidthPx ? card.zoneWidthPx / n : 0);
     const perCol = Math.ceil(tilePx / (c1 - c0 + 1) / 7);

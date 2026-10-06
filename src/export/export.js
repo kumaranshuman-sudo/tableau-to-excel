@@ -402,8 +402,10 @@ export async function exportToExcel() {
       const span = grid.span(item);
       if (item.layout && span) {
         // a table covers every column it writes (it may run past its zone into free space)
-        const gridW = item.splitPx ? Math.max(span.gridW, item.splitPx.length) : span.gridW;
-        return { ...item, gridRow: item.layout.gridRow, gridCol: span.gridCol, gridW, allocatedRows: item.rowCount };
+        const fieldsEnd = span.fields && span.fields.length ? span.fields[span.fields.length - 1].offset + span.fields[span.fields.length - 1].span : 0;
+        const gridW = Math.max(span.gridW, fieldsEnd);
+        return { ...item, gridRow: item.layout.gridRow, gridCol: span.gridCol, gridW, allocatedRows: item.rowCount,
+                 splitCuts: span.cuts, fieldCols: span.fields };
       }
       if (item.layout) {
         const l = item.layout;
@@ -638,13 +640,14 @@ setTableVisibleRows(placedItems);
       } else if (item.textCard) {
         writeKpiCard(worksheet, item.textCard, null, item.gridRow, item.gridCol, item.gridW, tracker, colWidths);
       } else if (item.kpiCard) {
-        writeKpiCard(worksheet, item.kpiCard, item.vm, item.gridRow, item.gridCol, item.gridW, tracker, colWidths);
+        writeKpiCard(worksheet, item.kpiCard, item.vm, item.gridRow, item.gridCol, item.gridW, tracker, colWidths, item.splitCuts);
       } else if (item.isKPI) {
         writeKPICardStacked(worksheet, item.vm, item.gridRow, item.gridCol, tracker);
         colWidths[item.gridCol] = Math.max(colWidths[item.gridCol] || 0, 22);
         colWidths[item.gridCol + 1] = Math.max(colWidths[item.gridCol + 1] || 0, 18);
       } else {
-        writeRegularTable(worksheet, item.vm, item.gridRow, item.gridCol, tracker, allTablesInfo, colWidths, exactWidths, item.visibleRows);
+        writeRegularTable(worksheet, item.vm, item.gridRow, item.gridCol, tracker, allTablesInfo, colWidths, exactWidths, item.visibleRows,
+                          item.fieldCols);
       }
     }
 

@@ -128,12 +128,23 @@ export function tableColumnPx(vm) {
   });
 }
 
+/**
+ * @param {number} [visibleRows] rows kept visible before the rest is grouped
+ * @param {{ offset: number, span: number }[] | null} [fieldCols] each field's first column (from originCol) and how
+ *   many columns it spans on the dashboard grid; null = one column per field
+ */
 export function writeRegularTable(worksheet, vm, originRow, originCol, rangeTracker, allTablesInfo, colWidths, exactWidths,
-                                  visibleRows = ROW_GROUP_THRESHOLD) {
+                                  visibleRows = ROW_GROUP_THRESHOLD, fieldCols = null) {
   let r = originRow;
   const C = originCol;
   const { fmt, cols, rows, order } = vm;
   const numCols = order.length;
+  // field k's first sheet column, and its last: a field crossed by another block's column edge spans both columns
+  const grid = fieldCols && fieldCols.length === numCols ? fieldCols : null;
+  const colAt = k => C + (grid ? grid[k].offset : k);
+  const lastAt = k => colAt(k) + (grid ? grid[k].span : 1) - 1;
+  const lastCol = lastAt(numCols - 1);
+  const wideFields = !!grid && grid.some(f => f.span > 1);
   if (!fmt.hasModel) console.log(`[Format] No TWB format info for "${vm.title.text}" – using Tableau defaults`);
 
   const plan = buildColorPlan(fmt, cols, rows);
@@ -149,9 +160,9 @@ export function writeRegularTable(worksheet, vm, originRow, originCol, rangeTrac
   // ── Title (respects the dashboard zone's "Show title") ──
   if (vm.showTitle) {
     const tp = vm.title.props.bgColor ? vm.title.props : { ...vm.title.props, bgColor: tableBg };
-    writeTableauTitle(worksheet, r, C, vm.title.text, tp, numCols);
+    writeTableauTitle(worksheet, r, C, vm.title.text, tp, lastCol - C + 1);
     rangeTracker.update(r, C);
-    rangeTracker.update(r, C + numCols - 1);
+    rangeTracker.update(r, lastCol);
     r++;
   }
 
@@ -162,7 +173,7 @@ export function writeRegularTable(worksheet, vm, originRow, originCol, rangeTrac
   const widthOf = {};
   order.forEach((ci, k) => {
     const info = cols[ci];
-    const excelCol = C + k;
+    const excelCol = colAt(k);
     const measureNamesRef = info.pivoted ? tfParseFieldRef("[:Measure Names]") : null;
     const px = fmt.widthPx(info.ref) || (measureNamesRef && fmt.widthPx(measureNamesRef)) || info.zoneWidthPx;
     if (px) {
@@ -194,7 +205,7 @@ export function writeRegularTable(worksheet, vm, originRow, originCol, rangeTrac
       // header label sits over its column: same alignment as the values (numbers right, text left)
       if (!p.hAlign) p.hAlign = info.isHeader ? styles[ci].hAlign : (styles[ci].hAlign || (numericCol(ci) ? "right" : "left"));
       if (/\n/.test(info.label) || info.label.length > 18) p.wrap = true;
-      const cell = worksheet.getCell(r + 1, C + k + 1);
+      const cell = worksheet.getCell(r + 1, colAt(k) + 1);
       tfWriteCell(cell, { formattedValue: info.label, value: info.label }, p, {
         fill: p.bgColor || tableBg || undefined,
         border: { bottom: borderSide(rowDiv), right: k < numCols - 1 ? borderSide(colDiv) : undefined }
@@ -208,15 +219,16 @@ export function writeRegularTable(worksheet, vm, originRow, originCol, rangeTrac
       // the label wraps in it, centred as Tableau draws it (which also keeps it clear of the filter buttons
       // on the last row)
       const across = info.headerSpan || 1;
-      if (!info.headerCovered && (span > 1 || across > 1)) {
-        cell.alignment = { ...(cell.alignment || {}), wrapText: true };
-        for (let i = 0; i < span; i++) for (let j = 0; j < across; j++) {
-          if (i || j) worksheet.getCell(r + 1 + i, C + k + 1 + j).border = cell.border;
+      const to = lastAt(Math.min(numCols - 1, k + across - 1));     // its last sheet column
+      if (!info.headerCovered && (span > 1 || to > colAt(k))) {
+        if (span > 1 || across > 1) cell.alignment = { ...(cell.alignment || {}), wrapText: true };
+        for (let i = 0; i < span; i++) for (let c = colAt(k); c <= to; c++) {
+          if (i || c > colAt(k)) worksheet.getCell(r + 1 + i, c + 1).border = cell.border;
         }
-        merges.push([r + 1, C + k + 1, r + span, C + k + across]);
+        merges.push([r + 1, colAt(k) + 1, r + span, to + 1]);
       }
       if (span > 1) for (let i = 0; i < span; i++) worksheet.getRow(r + 1 + i).height = 15;
-      rangeTracker.update(r + span - 1, C + k);
+      rangeTracker.update(r + span - 1, lastAt(k));
     });
     merges.forEach(m => worksheet.mergeCells(...m));
     // wrapped labels and no height stored: at most two lines, not a row Excel grows to fit every word
@@ -282,8 +294,13 @@ export function writeRegularTable(worksheet, vm, originRow, originCol, rangeTrac
         }
       }
       const pp = /\n/.test(text) ? { ...p, wrap: true } : p;    // wrap only on real line breaks
-      tfWriteCell(worksheet.getCell(r + 1, C + k + 1), dv, pp, extra);
-      rangeTracker.update(r, C + k);
+      const cell = worksheet.getCell(r + 1, colAt(k) + 1);
+      tfWriteCell(cell, dv, pp, extra);
+      if (lastAt(k) > colAt(k)) {                                // a field over several columns: one merged cell
+        for (let c = colAt(k) + 1; c <= lastAt(k); c++) worksheet.getCell(r + 1, c + 1).style = cell.style;
+        worksheet.mergeCells(r + 1, colAt(k) + 1, r + 1, lastAt(k) + 1);
+      }
+      rangeTracker.update(r, lastAt(k));
     });
 
     const excelRow = worksheet.getRow(r + 1);
@@ -295,7 +312,7 @@ export function writeRegularTable(worksheet, vm, originRow, originCol, rangeTrac
     r++;
   });
 
-  if (marks.size) writeMarkBars(worksheet, marks, cols, rows, order, dataStartRow, C);
+  if (marks.size) writeMarkBars(worksheet, marks, cols, rows, order, dataStartRow, colAt);
 
   if (needsGrouping) {
     const hiddenCount = totalRows - keepRows;
@@ -313,9 +330,10 @@ export function writeRegularTable(worksheet, vm, originRow, originCol, rangeTrac
       order.map(ci => ({ fieldName: cols[ci].name })), dataStartRow, C, {});
   }
 
-  if (allTablesInfo && !vm.markTable) {                    // a table built from marks gets no filter buttons
+  // no filter buttons on a table built from marks, nor on merged fields (a button would sit inside the field)
+  if (allTablesInfo && !vm.markTable && !wideFields) {
     allTablesInfo.push({ name: vm.title.text, headerRow: vm.showHeaderRow ? headerRow : dataStartRow,
-      leftCol: C, rightCol: C + numCols - 1,
+      leftCol: C, rightCol: lastCol,
       bottomRow: dataStartRow + totalRows - 1,             // last DATA row – the grouping note stays outside the filter
       rowCount: totalRows, hasHeader: vm.showHeaderRow });
   }
