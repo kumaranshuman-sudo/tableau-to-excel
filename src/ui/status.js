@@ -40,6 +40,18 @@ export function updateVisualStatus(statuses, note) {
     target.textContent = "No worksheet visual status available";
     return;
   }
+  // once converted: how (NATIVE … TABLE_FALLBACK, as on the report sheet); before that, which renderer
+  if (statuses.every(item => item.strategy)) {
+    const order = ["NATIVE", "CONSTRUCTED", "APPROXIMATE", "TABLE_FALLBACK", "IMAGE_FALLBACK", "UNSUPPORTED", "FAILED"];
+    const words = { NATIVE: "native", CONSTRUCTED: "constructed", APPROXIMATE: "approximated", TABLE_FALLBACK: "as data tables",
+                    IMAGE_FALLBACK: "as pictures", UNSUPPORTED: "unsupported", FAILED: "failed" };
+    const parts = order.map(s => [statuses.filter(item => item.strategy === s).length, words[s]]).filter(([n]) => n);
+    const flagged = statuses.filter(item => item.strategy !== "NATIVE" && item.strategy !== "CONSTRUCTED");
+    target.textContent = `${statuses.length} visuals: ${parts.map(([n, w]) => `${n} ${w}`).join(", ")} – see the Conversion Report sheet`;
+    target.title = flagged.map(w => `${w.worksheet} (${w.visual}): ${w.strategy} – ${w.reason}`).join("\n");
+    target.classList.toggle("status-warning", statuses.some(item => item.strategy === "FAILED"));
+    return;
+  }
   const count = renderer => statuses.filter(item => item.renderer === renderer).length;
   const parts = [
     [count("cell"), "tables/KPIs"],

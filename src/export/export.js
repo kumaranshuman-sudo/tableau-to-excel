@@ -21,7 +21,11 @@ import { tvIconSheet } from "../visual/icon-sheet.js";
 import { isKPIViewModel } from "../visual/classify.js";
 import { renderTableauImage } from "../visual/image-renderer.js";
 import { VISUAL_RENDERERS, buildVisualModel, chooseVisualRenderer, imageOrFallback } from "../visual/visual-model.js";
+import { describeVisual } from "../visual/semantics.js";
+import { STRATEGY, conversionOf } from "../visual/strategy.js";
 import { checkWorkbookMatch, describeWorkbookMatch } from "../visual/workbook-match.js";
+import { appendVisualData } from "./data-sheet.js";
+import { writeConversionReport } from "./report.js";
 import { ExcelChartWriter } from "../charts/writer/index.js";
 import { fixSheetProperties } from "../charts/writer/package.js";
 import { exportFileName as makeExportFileName } from "../util.js";
@@ -87,6 +91,8 @@ export async function exportToExcel() {
     const pieCentreSheets = new Set();
     /** @type {ExportItem[]} colour legends of pies, drawn at their dashboard position */
     const pieLegendItems = [];
+    /** @type {{ name: string, reason: string }[]} worksheets not exported, and why (conversion report) */
+    const skipped = [];
     /* A pie's colour legends shown on the dashboard (the chart has none of its own): the TWB legend zones of the
        sheet, matched to each ring by the field they show, laid out at their dashboard position. TWB zones use
        0–100000 units: they are mapped to API pixels through the sheet's own zone. */
@@ -114,22 +120,26 @@ export async function exportToExcel() {
     for (const { sheet, data, visualSpec, visualSpecError, error } of allSheetsData) {
       if (error) {
         console.warn(`Skipping "${sheet.name}": ${error.message}`);
+        skipped.push({ name: sheet.name, reason: `FAILED – Tableau did not return its data: ${error.message}` });
         continue;
       }
 
       // ---- DZV check ----
       if (dzvMap[sheet.name] === false) {
         console.log(`[DZV] Skipping hidden sheet: "${sheet.name}"`);
+        skipped.push({ name: sheet.name, reason: "hidden on the dashboard (not visible, or squeezed into a tiny zone)" });
         continue;
       }
 
       let summaryData = data;  // already fetched
       if (!summaryData.columns || summaryData.columns.length === 0) {
         console.warn(`[Export] Skipping "${sheet.name}": summary data has no columns`);
+        skipped.push({ name: sheet.name, reason: "no data: Tableau returned no columns for it" });
         continue;
       }
       if (!summaryData.data || summaryData.data.length === 0) {
         console.warn(`[Export] Skipping "${sheet.name}": summary data has no rows`);
+        skipped.push({ name: sheet.name, reason: "no data: no marks with the current filters" });
         continue;
       }
 
@@ -140,7 +150,10 @@ export async function exportToExcel() {
       const icon = fmtModel ? tvIconSheet(fmtModel, sheet.name, summaryData) : null;
       if (icon) {
         if (icon.shape && layout) iconSheets.push({ name: sheet.name, shape: icon.shape, layout });
-        else console.log(`[Icons] ${sheet.name}: a Tableau shape – not exported`);
+        else {
+          console.log(`[Icons] ${sheet.name}: a Tableau shape – not exported`);
+          skipped.push({ name: sheet.name, reason: "a button / icon drawn with one of Tableau's built-in shapes" });
+        }
         continue;
       }
 
@@ -235,6 +248,7 @@ export async function exportToExcel() {
         if (renderDecision.renderer === "data-fallback" && visualModel.viewModel.kind === "chart" &&
             FORMAT_CONFIG.chartPolicy === "skip") {
           console.warn(`[Export] "${sheet.name}" is a chart - skipped by FORMAT_CONFIG.chartPolicy`);
+          skipped.push({ name: sheet.name, reason: `UNSUPPORTED – ${renderDecision.reason} (chartPolicy "skip")` });
           continue;
         }
         let vm = visualModel.viewModel;
@@ -254,11 +268,12 @@ export async function exportToExcel() {
         }
         if (!vm.rows.length || !vm.order.length) {
           console.warn(`[Export] Skipping "${sheet.name}": no renderable rows or columns after fallback`);
+          skipped.push({ name: sheet.name, reason: "FAILED – no rows or columns left to write" });
           continue;
         }
-        // a chart exported as data: axis/colour/detail fields are the data – show every column, except the
-        // latitude / longitude Tableau generates only to place a map's marks
-        if (visualModel.renderer === "data-fallback" && !VISUAL_RENDERERS.cellTypes.has(visualModel.type)) {
+        // a chart exported as data – or a table whose cells would drop what its marks show: axis/colour/detail fields
+        // are the data – show every column, except the latitude / longitude Tableau generates only to place a map's marks
+        if ((visualModel.renderer === "data-fallback" && !VISUAL_RENDERERS.cellTypes.has(visualModel.type)) || vm.lossless === false) {
           vm.order = vm.cols.map((_, i) => i).filter(i => !/^(latitude|longitude) \(generated\)$/i.test(vm.cols[i].name));
           vm.cols.forEach(c => { if (!c.label) c.label = c.name; });
           vm.showHeaderRow = true;
@@ -287,18 +302,21 @@ export async function exportToExcel() {
     }
 
     // ── parameter controls (e.g. Start Date / End Date): not filters, so read them separately ──
+    /** @type {{ name: string, value: string }[]} every parameter's value at export time (conversion report) */
+    const reportParams = [];
     try {
       const params = typeof dashboard.getParametersAsync === "function" ? await dashboard.getParametersAsync() : [];
       const controls = (dashboard.objects || []).filter(o => OBJECT_KIND[o.type] === "parameter" && o.isVisible !== false);
       const used = new Set();
       const norm = s => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
       params.forEach(param => {
+        const raw = param.currentValue ? (param.currentValue.formattedValue ?? String(param.currentValue.value)) : "";
+        const value = String(raw).replace(/\s+12:00:00\s*AM$|\s+00:00:00$/i, "");   // dates: no midnight time
+        reportParams.push({ name: param.name, value });
         let control = controls.find(o => !used.has(o) && norm(o.name) === norm(param.name)) ||
                       controls.find(o => !used.has(o) && norm(o.name).includes(norm(param.name)));
         if (!control) return;                                      // parameter not shown on this dashboard
         used.add(control);
-        const raw = param.currentValue ? (param.currentValue.formattedValue ?? String(param.currentValue.value)) : "";
-        const value = String(raw).replace(/\s+12:00:00\s*AM$|\s+00:00:00$/i, "");   // dates: no midnight time
         filterValueItems.push({
           type: "filterValue", isParameter: true, name: param.name, visualName: param.name,
           filterName: param.name, values: [value], layout: layoutMap.get(control.name), rowCount: 2
@@ -596,13 +614,16 @@ setTableVisibleRows(placedItems);
           const imageBase64 = await renderTableauImage(item.visualModel, imageWidth, imageHeight);
           const titleRows = writeGraphicTitle(item);
           const imageId = workbook.addImage({ base64: imageBase64, extension: "png" });
-          worksheet.addImage(imageId, {
+          // a picture is not data: the visual's marks go to the Visual Data sheet too, and the picture links to them
+          const dataLink = appendVisualData(workbook, item.visualName || item.name, item.vm);
+          worksheet.addImage(imageId, /** @type {any} */ ({
             tl: { col: item.gridCol, row: item.gridRow + titleRows },
-            ext: { width: imageWidth, height: imageHeight }
-          });
+            ext: { width: imageWidth, height: imageHeight },
+            hyperlinks: { hyperlink: dataLink, tooltip: "The data of this picture (Visual Data sheet)" }
+          }));
           reserveGraphicBlock(item);
           item.visualModel.status = "success";
-          item.visualModel.statusReason = "Tableau SVG rendered and embedded as PNG";
+          item.visualModel.statusReason = "Tableau-rendered picture; its data on the Visual Data sheet";
           if (status) {
             status.status = "success";
             status.reason = item.visualModel.statusReason;
@@ -612,6 +633,10 @@ setTableVisibleRows(placedItems);
           item.visualModel.renderer = "data-fallback";
           item.visualModel.status = "warning";
           item.visualModel.statusReason = `image renderer failed: ${err.message}`;
+          // exported as its data: every column, as for any chart that falls back to a table
+          item.vm.order = item.vm.cols.map((_, i) => i).filter(i => !/^(latitude|longitude) \(generated\)$/i.test(item.vm.cols[i].name));
+          item.vm.cols.forEach(c => { if (!c.label) c.label = c.name; });
+          item.vm.showHeaderRow = true;
           if (status) {
             status.renderer = "data-fallback";
             status.status = "warning";
@@ -648,6 +673,22 @@ setTableVisibleRows(placedItems);
                           item.fieldCols);
       }
     }
+
+    // ── how each visual was converted (NATIVE … TABLE_FALLBACK), and why: the report sheet, the panel status, and a
+    //    note on every visual exported as its data so the reader of the sheet knows what it stands for
+    /** @type {ReportVisual[]} */
+    const reportVisuals = [];
+    adjustedItems.filter(it => it.type === "worksheet" && it.visualModel).forEach(item => {
+      const semantics = describeVisual(item.visualModel, fmtModel);
+      const conversion = conversionOf(item.visualModel, semantics);
+      reportVisuals.push({ worksheet: item.name, semantics, ...conversion });
+      const status = visualStatuses.find(entry => entry.worksheet === item.name);
+      if (status) Object.assign(status, { strategy: conversion.strategy, visual: semantics.visual });
+      if (FORMAT_CONFIG.fallbackNotes && conversion.strategy === STRATEGY.TABLE_FALLBACK) {
+        worksheet.getCell(item.gridRow + 1, item.gridCol + 1).note =
+          `Tableau visual: ${semantics.visual}\nExported as: its data (TABLE_FALLBACK)\nWhy: ${conversion.reason}`;
+      }
+    });
 
     updateVisualStatus(visualStatuses, workbookWarning);
 
@@ -849,6 +890,23 @@ setTableVisibleRows(placedItems);
                            Math.round((img.yPx - host.layout.yPx) * sy) + fit.y, fit.w, fit.h)) picturesAdded++;
     }
     if (picturesAdded) console.log(`[Images] ${picturesAdded} picture(s) added`);
+
+    if (FORMAT_CONFIG.conversionReport) {
+      const objects = [
+        ...textItems.map(it => ({ name: String(it.visualName || "").slice(0, 60) || it.name, kind: "Text box", output: "Cells, with Tableau's fonts" })),
+        ...imageItems.map(it => ({ name: it.visualName, kind: iconSheets.some(s => s.name === it.name) ? "Button / icon sheet" : "Image",
+                                   output: "Picture" })),
+        ...pieLegendItems.map(it => ({ name: it.visualName, kind: "Colour legend", output: "Cells: a colour key per item" })),
+        ...filterValueItems.map(it => ({ name: it.filterName, kind: it.isParameter ? "Parameter control" : "Filter card",
+                                         output: it.isParameter ? "Cells: its value" : "Cells: the selected values" })),
+        ...[...pieCentreSheets].map(name => ({ name, kind: "Worksheet in a donut's hole", output: "The donut's centre text" }))
+      ];
+      writeConversionReport(workbook, {
+        dashboard: dashboardName, workbookFile: formatModelFileName(), visuals: reportVisuals, objects, skipped,
+        filters: Object.entries(filterValuesMap).map(([name, values]) => ({ name, values: values.map(String) })),
+        parameters: reportParams
+      });
+    }
 
     setExportStatus("Building the Excel file…");
     /** @type {any} the XLSX bytes: ExcelJS's buffer, then injectCharts' Uint8Array */

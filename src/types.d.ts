@@ -76,6 +76,11 @@ interface AxisSpace {
   majorShow?: string;
   /** "false" = the axis does not extend to zero */
   domainExpand?: string;
+  /** Edit Axis → Scale → Reversed */
+  reverse?: boolean;
+  /** Dual Axis: folded onto the axis before it (overlaid), and with the same scale */
+  fold?: boolean;
+  synchronized?: boolean;
 }
 
 /** Analytics → Reference Line */
@@ -192,6 +197,16 @@ interface FieldInfo {
   value?: string;
   /** a calculation that is a single number ("MIN(0)") */
   constant?: number;
+  /** a calculated field: what kind (parser.js tfCalcKind) and its formula, shortened */
+  calcKind?: string;
+  formula?: string;
+  /** a bin of a measure / a group of a dimension */
+  bin?: boolean;
+  group?: boolean;
+  /** a parameter */
+  param?: boolean;
+  /** a geographic role ("[State].[Name]") */
+  geoRole?: string;
 }
 
 /** parseTableauFormatting() result. */
@@ -215,6 +230,8 @@ type SheetFormatter = ReturnType<typeof import("./twb/formatter.js").createSheet
 
 interface ViewColumn {
   name: string;
+  /** ref resolved from the column's field id (exact), not its caption */
+  exact?: boolean;
   dataType?: string;
   ref: FieldRef | null;
   /** a Measure Values measure turned into its own column */
@@ -253,6 +270,13 @@ interface ViewModel {
   kind: "chart" | "table";
   /** all header columns (hidden ones too), outer → inner */
   headerOrder: number[];
+  /** a heat map / highlight table pivoted into a matrix: the Columns shelf's members as columns (view-model.js) */
+  matrix?: { colDims: number[]; valueCi: number; colorCi: number };
+  /** per-cell fill of a matrix (ARGB), null = the column's own */
+  cellFill?: (rowIdx: number, ci: number) => string | null;
+  /** false: the cells would not show what the marks encode, so the export writes every column (TABLE_FALLBACK) */
+  lossless?: boolean;
+  fallbackReason?: string;
 }
 
 /** Value of VISUAL_TYPES (config.js): "TABLE", "BAR", "LINE", "PIE", "TREEMAP" … */
@@ -292,6 +316,8 @@ interface VisualModel {
   };
   viewModel: ViewModel;
   diagnostics: any[];
+  /** why the classifier chose the type (conversion report) */
+  evidence?: string[];
   /* set by the export once a renderer is chosen */
   renderer?: RendererName;
   status?: string;
@@ -352,6 +378,12 @@ interface Roles {
 /** What every chart spec builder receives. */
 interface ChartContext {
   vm: ViewModel;
+  /** the workbook's format model (field captions, calculations, constants), null without one */
+  model?: FormatModel | null;
+  /** the mark Tableau's Automatic draws for these shelves (an Automatic marks card beside explicit ones) */
+  autoMark?: string;
+  /** rounded bars: thick lines in Tableau, bars in Excel */
+  roundedBar?: boolean;
   roles: Roles;
   markToken: string;
   type: VisualType;
@@ -490,6 +522,29 @@ interface ChartSpec {
   /** set by buildExcelChartSpecs */
   name?: string;
   rolesSource?: RolesSource;
+  /** 100% stacked bars / areas */
+  percent?: boolean;
+  /** bars of a synchronized dual axis drawn over each other on one axis (progress bar over its track) */
+  overlap?: boolean;
+  /** dual-axis bars: the secondary axis's bars narrower, inside the primary ones (bar in bar) */
+  secondaryGapWidth?: number;
+  /** Synchronize Axis: the secondary value axis takes the primary's range (one scale for both) */
+  secondarySync?: boolean;
+  /** line chart: high-low lines joining each category's markers (dumbbell) */
+  hiLowLines?: { color: string };
+  /** horizontal bullet graph: one target tick per category, drawn over the bars */
+  targets?: { name: string; values: (number | null)[]; color: string };
+  /** horizontal bars: marks drawn over the category bands – values on the value axis, cats = band index (null = a gap) */
+  overlay?: { name: string; color: string; values: (number | null)[]; cats: (number | null)[]; marker?: string; markerSize?: number;
+              line?: boolean; lineWidth?: number }[];
+  /** scatter: Edit Axis → Reversed on the x axis */
+  xReversed?: boolean;
+  /** back-to-back bars (butterfly): one wing negated, so an axis Tableau reversed for it stays as it is */
+  mirrored?: boolean;
+  /** Edit Axis → Reversed on the value axis (bump charts: rank 1 at the top) */
+  valueReversed?: boolean;
+  /** how this chart stands for the Tableau visual when it is not a direct Excel equivalent (conversion report) */
+  conversion?: { strategy: "NATIVE" | "CONSTRUCTED" | "APPROXIMATE"; output?: string; note?: string; fidelity?: string };
 }
 
 /* ── chart writer (charts/writer) ────────────────────────────────────────── */
@@ -598,4 +653,32 @@ interface ExportItem {
 interface Window {
   showOpenFilePicker?: (options?: any) => Promise<any[]>;
   showSaveFilePicker?: (options?: any) => Promise<any>;
+}
+
+/* ── conversion report (visual/semantics.js, visual/strategy.js, export/report.js) ─────────────────────── */
+
+/** describeVisual(): the Tableau visual in Tableau's terms, and the evidence. */
+interface VisualSemantics {
+  /** "Stacked Bar", "Bump Chart", "Filled Map" … */
+  visual: string;
+  family: VisualType;
+  confidence: "high" | "medium" | "low";
+  evidence: string[];
+  /** shelf / encoding → field labels ("rows": ["Category"], "color": ["SUM(Profit)"]) */
+  encodings: Record<string, string[]>;
+  calculations: { name: string; kind: string }[];
+  flags: Record<string, boolean>;
+}
+
+/** conversionOf(): how one visual was exported. */
+interface Conversion {
+  strategy: "NATIVE" | "CONSTRUCTED" | "APPROXIMATE" | "TABLE_FALLBACK" | "IMAGE_FALLBACK" | "UNSUPPORTED" | "FAILED";
+  excelOutput: string;
+  fidelity: string;
+  reason: string;
+}
+
+interface ReportVisual extends Conversion {
+  worksheet: string;
+  semantics: VisualSemantics;
 }

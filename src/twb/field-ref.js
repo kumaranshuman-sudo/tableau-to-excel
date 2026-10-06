@@ -30,10 +30,12 @@ export function tfTableCalcBase(ref) {
   return tfParseFieldRef(ref.ds ? `[${ref.ds}].[${inner}]` : `[${inner}]`);
 }
 
-/** @param {string} text @returns {FieldRef[]} */
+/** The field references in a shelf or label text. A relationship model's "Count of <table>" is one reference of
+ * three parts: "[ds].[__tableau_internal_object_id__].[cnt:Orders.csv_…:qk]".
+ * @param {string} text @returns {FieldRef[]} */
 export function tfExtractRefs(text) {
   if (!text) return [];
-  const m = String(text).match(/(?:\[[^\]]+\]\.)?\[[^\]]+\]/g) || [];
+  const m = String(text).match(/(?:\[[^\]]+\]\.)?(?:\[__tableau_internal_object_id__\]\.)?\[[^\]]+\]/g) || [];
   return m.map(tfParseFieldRef).filter(Boolean);
 }
 

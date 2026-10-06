@@ -101,7 +101,10 @@ export function tfParseStyle(styleEl) {
     max: tfNum(e.getAttribute("max")),
     majorSpacing: tfNum(e.getAttribute("major-spacing")),
     majorShow: e.getAttribute("major-show") || undefined,      // "false": Edit Axis → Tick Marks → None
-    domainExpand: e.getAttribute("domain-expand") || undefined
+    domainExpand: e.getAttribute("domain-expand") || undefined,
+    reverse: e.getAttribute("reverse") === "true" || undefined, // Edit Axis → Scale → Reversed (rank 1 at the top)
+    fold: e.getAttribute("fold") === "true" || undefined,       // Dual Axis: this axis is folded onto the one before it
+    synchronized: e.getAttribute("synchronized") === "true" || undefined   // … with the same scale (Synchronize Axis)
   }));
   // Shape encodings: value → shape ("Zoom Icons/Zoom in.png" = a custom shape, ":filled/circle" = Tableau's)
   const shapes = Array.from(styleEl.getElementsByTagName("encoding")).filter(e => e.getAttribute("attr") === "shape").map(e => {
@@ -137,9 +140,37 @@ function tfConstantFormula(calc) {
   return m ? Number(m[1] ?? m[2]) : undefined;
 }
 
+/**
+ * What kind of calculation a calculated field is, from its formula – for the conversion report (the export
+ * writes the values Tableau computed; formulas are not translated).
+ * @param {string} formula @returns {string}
+ */
+export function tfCalcKind(formula) {
+  const f = String(formula || "").replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, " ");
+  if (/\{\s*(FIXED|INCLUDE|EXCLUDE)\b|\{\s*(SUM|AVG|MIN|MAX|COUNTD?)\s*\(/i.test(f)) return "LOD expression";
+  if (/\b(WINDOW_\w+|RUNNING_\w+|RANK(_\w+)?|INDEX|FIRST|LAST|LOOKUP|PREVIOUS_VALUE|SIZE|TOTAL)\s*\(/i.test(f)) return "table calculation";
+  if (/\b(SUM|AVG|MIN|MAX|COUNTD?|MEDIAN|ATTR|STDEVP?|VARP?|PERCENTILE)\s*\(/i.test(f)) return "aggregation";
+  if (/\b(DATEPART|DATETRUNC|DATEADD|DATEDIFF|DATENAME|DATEPARSE|MAKEDATE|TODAY|NOW|YEAR|QUARTER|MONTH|WEEK|DAY)\s*\(/i.test(f)) return "date calculation";
+  if (/\b(IF|CASE|IIF|ZN|IFNULL|ISNULL)\b/i.test(f)) return "conditional logic";
+  if (/\b(MAKEPOINT|MAKELINE|BUFFER|DISTANCE|SCRIPT_\w+|RAWSQL\w*|REGEXP_\w+|SPLIT)\s*\(/i.test(f)) return "Tableau-specific function";
+  return /[-+*/]/.test(f) ? "arithmetic" : "expression";
+}
+
+/** a datasource column's calculation: a constant, a bin, or a calculated field (its kind and formula)
+ * @param {Element | null} calc */
+function tfCalcInfo(calc) {
+  if (!calc) return {};
+  const cls = calc.getAttribute("class") || "";
+  const formula = calc.getAttribute("formula") || "";
+  if (cls === "bin") return { bin: true };
+  if (cls === "categorical-bin") return { group: true };
+  if (!formula) return {};
+  return { constant: tfConstantFormula(calc), calcKind: tfCalcKind(formula), formula: formula.length > 160 ? formula.slice(0, 157) + "…" : formula };
+}
+
 /* Raise when the parser reads something new: a workbook model remembered by an older version is then
    parsed again from its stored XML (ui/workbook-store.js), so an update reaches workbooks loaded before it. */
-export const FORMAT_MODEL_VERSION = 3;
+export const FORMAT_MODEL_VERSION = 4;
 
 /** @param {string} xmlString the .twb XML @returns {FormatModel} */
 export function parseTableauFormatting(xmlString) {
@@ -163,7 +194,9 @@ export function parseTableauFormatting(xmlString) {
         defaultFormat: col.getAttribute("default-format") || undefined,
         alias: col.getAttribute("alias") || undefined,      // parameters: current value's display text
         value: col.getAttribute("value") || undefined,
-        constant: tfConstantFormula(tfKid(col, "calculation"))
+        param: col.getAttribute("param-domain-type") ? true : undefined,
+        geoRole: col.getAttribute("semantic-role") || undefined,   // "[State].[Name]": Tableau geocodes it on a map
+        ...tfCalcInfo(tfKid(col, "calculation"))
       });
       model.fields[dsName + "|" + n.toLowerCase()] = info;
       if (!model.fields["|" + n.toLowerCase()]) model.fields["|" + n.toLowerCase()] = info;
@@ -198,10 +231,12 @@ export function parseTableauFormatting(xmlString) {
         if (!n) return;
         const key = dsName + "|" + n.toLowerCase();
         const cur = model.fields[key] || {};
+        // a calculation typed into a shelf exists only here (an unnamed calc: "avg(0)" placing a butterfly's labels)
         model.fields[key] = tfMerge(tfDefined({ name: n, ds: dsName, caption: col.getAttribute("caption") || undefined,
           role: col.getAttribute("role") || undefined, datatype: col.getAttribute("datatype") || undefined,
           defaultFormat: col.getAttribute("default-format") || undefined,
-          alias: col.getAttribute("alias") || undefined, value: col.getAttribute("value") || undefined }), cur);
+          alias: col.getAttribute("alias") || undefined, value: col.getAttribute("value") || undefined,
+          ...tfCalcInfo(tfKid(col, "calculation")) }), cur);
         if (!model.fields["|" + n.toLowerCase()]) model.fields["|" + n.toLowerCase()] = model.fields[key];
       });
     });

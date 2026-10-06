@@ -130,6 +130,36 @@ export function refLineXY(spec, rl, k) {
     `<c:xVal>${lit([rl.value, rl.value])}</c:xVal><c:yVal>${lit([0, 1])}</c:yVal><c:smooth val="0"/></c:ser>`;
 }
 
+/* bullet targets across horizontal bars: one vertical tick per category at its target, on the hidden x2 / y2 axes
+ * (y2 runs 0 – 1 bottom to top; the first category is the top band). Blank points between ticks break the line. */
+export function targetTicksXY(spec, k) {
+  const t = spec.targets, n = t.values.length;
+  const xs = [], ys = [];
+  t.values.forEach((v, i) => {
+    const mid = 1 - (i + 0.5) / n, half = 0.32 / n;
+    xs.push(v, v, null); ys.push(mid - half, mid + half, null);
+  });
+  const lit = vals => `<c:numLit><c:formatCode>General</c:formatCode><c:ptCount val="${vals.length}"/>` +
+    vals.map((v, i) => num(v) === null ? "" : `<c:pt idx="${i}"><c:v>${v}</c:v></c:pt>`).join("") + `</c:numLit>`;
+  return `<c:ser><c:idx val="${k}"/><c:order val="${k}"/><c:tx><c:v>${esc(t.name || "Target")}</c:v></c:tx>` +
+    `<c:spPr><a:ln w="28575" cap="flat">${solid(t.color || "333333")}</a:ln></c:spPr><c:marker><c:symbol val="none"/></c:marker>` +
+    `<c:xVal>${lit(xs)}</c:xVal><c:yVal>${lit(ys)}</c:yVal><c:smooth val="0"/></c:ser>`;
+}
+
+/* marks over horizontal bars' category bands (dots of a dot plot or lollipop, a dumbbell's joining lines): XY points
+ * (value, band) on the hidden x2 / y2 axes – a band's centre is 1 − (i + ½) / n; a null band breaks the line */
+export function overlayXY(spec, o, k) {
+  const n = spec.categories && spec.categories.levels.length ? spec.categories.levels[0].length : 1;
+  const lit = vals => `<c:numLit><c:formatCode>General</c:formatCode><c:ptCount val="${vals.length}"/>` +
+    vals.map((v, i) => num(v) === null ? "" : `<c:pt idx="${i}"><c:v>${v}</c:v></c:pt>`).join("") + `</c:numLit>`;
+  const ys = o.cats.map(c => c === null || c === undefined ? null : +(1 - (c + 0.5) / n).toFixed(6));
+  const xs = o.values.map((v, i) => ys[i] === null ? null : v);
+  const ln = o.line ? `<a:ln w="${Math.round((o.lineWidth || 1.5) * 9525)}" cap="rnd">${solid(o.color)}</a:ln>` : `<a:ln w="19050"><a:noFill/></a:ln>`;
+  return `<c:ser><c:idx val="${k}"/><c:order val="${k}"/><c:tx><c:v>${esc(o.name || "Marks")}</c:v></c:tx>` +
+    `<c:spPr>${ln}</c:spPr>${markerXml(o.marker || "none", o.color, o.markerSize || 7)}` +
+    `<c:xVal>${lit(xs)}</c:xVal><c:yVal>${lit(ys)}</c:yVal><c:smooth val="0"/></c:ser>`;
+}
+
 /* a hidden value axis pinned to [min, max] (the XY overlay's x2 / y2) */
 export function hiddenValAx(id, cross, pos, min, max) {
   return `<c:valAx><c:axId val="${id}"/><c:scaling><c:orientation val="minMax"/><c:max val="${max}"/><c:min val="${min}"/></c:scaling>` +
@@ -154,9 +184,10 @@ export function niceUnit(range, ticks) {
  * @returns {{ fixed: { min?: number, max?: number }, unit: number | null }}
  */
 export function valueRange(spec, axisPlot) {
+  if (spec.percent) return { fixed: { min: 0, max: 1 }, unit: spec.valueMajorUnit || 0.2 };    // 100 % stacked: 0 – 100 %
   const fixed = { min: spec.valueMin, max: spec.valueMax };
   const vals = [], stacks = new Map();
-  spec.series.filter(s => !s.secondary && s.values).forEach(s => {
+  spec.series.filter(s => (!s.secondary || spec.secondarySync) && s.values).forEach(s => {
     const type = s.type || spec.kind;
     if (spec.stacked && !s.refLine && (type === "bar" || type === "area")) {
       const g = stacks.get(type) || [];
@@ -171,6 +202,8 @@ export function valueRange(spec, axisPlot) {
   });
   stacks.forEach(g => g.forEach(t => { if (t) vals.push(t.pos, t.neg); }));
   (spec.refLines || []).forEach(r => vals.push(r.value));
+  (spec.targets ? spec.targets.values : []).forEach(v => { if (num(v) !== null) vals.push(v); });
+  (spec.overlay || []).forEach(o => o.values.forEach(v => { if (num(v) !== null) vals.push(v); }));
   const ticks = axisPlot ? Math.max(2, Math.round(spec.barDir === "bar" ? axisPlot.w / 110 : axisPlot.h / 55)) : null;
   const aligned = (v, u) => Math.abs(v / u - Math.round(v / u)) < 1e-9;
   const round = v => +v.toPrecision(12);
@@ -262,8 +295,13 @@ export function seriesXml(spec, s, k, refs, type, hiddenLabels) {
       `${dLbls(spec, s, spec.packed ? "ctr" : "r", hiddenLabels)}${valXml("xVal", r.x, s.x)}${valXml("yVal", r.y, s.y)}` +
       `${valXml("bubbleSize", r.size, s.size)}<c:bubble3D val="0"/>${labelRangeXml(s, r)}</c:ser>`;
   }
-  // scatter
+  // scatter; a line of measure against measure joins its points in order, without markers (Tableau's line mark)
   const dpts = pc.map((c, i) => c ? `<c:dPt><c:idx val="${i}"/>${markerXml("circle", c, 7)}<c:bubble3D val="0"/></c:dPt>` : "").join("");
+  if (s.line) {
+    return `<c:ser>${head}<c:spPr><a:ln w="22225" cap="rnd">${solid(s.color, opacity)}<a:round/></a:ln></c:spPr>` +
+      `${markerXml(s.marker ? "circle" : "none", s.color, 7)}${dLbls(spec, s, "r")}${valXml("xVal", r.x, s.x)}${valXml("yVal", r.y, s.y)}` +
+      `<c:smooth val="0"/>${labelRangeXml(s, r)}</c:ser>`;
+  }
   return `<c:ser>${head}<c:spPr><a:ln w="19050"><a:noFill/></a:ln></c:spPr>${markerXml("circle", s.color, 7)}${dpts}` +
     `${dLbls(spec, s, "r")}${valXml("xVal", r.x, s.x)}${valXml("yVal", r.y, s.y)}<c:smooth val="0"/>` +
     labelRangeXml(s, r) + `</c:ser>`;
@@ -277,8 +315,8 @@ export function catAxis(spec, id, cross, o = {}) {
     `<c:delete val="${o.deleted ? 1 : 0}"/><c:axPos val="${horizontal ? "l" : "b"}"/>` +
     `${o.deleted ? "" : title(spec.categoryTitle, spec.font, horizontal)}` +
     `<c:numFmt formatCode="General" sourceLinked="1"/><c:majorTickMark val="none"/><c:minorTickMark val="none"/>` +
-    `<c:tickLblPos val="${o.deleted ? "none" : "low"}"/><c:spPr>${spec.axisLine === false ? "<a:ln><a:noFill/></a:ln>" : line("D4D4D4", 9525)}</c:spPr>${txPr(spec.font, { rot: o.rot })}` +
-    `<c:crossAx val="${cross}"/><c:crosses val="autoZero"/><c:auto val="1"/><c:lblAlgn val="ctr"/>` +
+    `<c:tickLblPos val="${o.deleted ? "none" : spec.valueReversed ? "nextTo" : "low"}"/><c:spPr>${spec.axisLine === false ? "<a:ln><a:noFill/></a:ln>" : line("D4D4D4", 9525)}</c:spPr>${txPr(spec.font, { rot: o.rot })}` +
+    `<c:crossAx val="${cross}"/><c:crosses val="${spec.valueReversed && !o.deleted ? "max" : "autoZero"}"/><c:auto val="1"/><c:lblAlgn val="ctr"/>` +
     `<c:lblOffset val="100"/>${o.rot !== undefined ? '<c:tickLblSkip val="1"/>' : ""}<c:noMultiLvlLbl val="${multi ? 0 : 1}"/></c:catAx>`;
 }
 
@@ -312,7 +350,7 @@ export function axisFmt(fmt, values) {
  * @param {ChartSpec} spec @param {number} id @param {number} cross
  * @param {{ pos?: string, crosses?: string, grid?: boolean, fixed?: { min?: number, max?: number }, title?: string,
  *           numFmt?: string, values?: (number | null)[], deleted?: boolean, lowLabels?: boolean, midCat?: boolean,
- *           majorUnit?: number | null, tickFmt?: string }} [o] tickFmt = the workbook's own tick format, used as is
+ *           majorUnit?: number | null, tickFmt?: string, reversed?: boolean }} [o] tickFmt = the workbook's own tick format, used as is
  */
 export function valAxis(spec, id, cross, o = {}) {
   const horizontal = spec.barDir === "bar" && spec.kind !== "scatter";
@@ -324,7 +362,7 @@ export function valAxis(spec, id, cross, o = {}) {
   const scale = fixed.max !== undefined || fixed.min !== undefined
     ? (fixed.max !== undefined ? `<c:max val="${fixed.max}"/>` : "") + (fixed.min !== undefined ? `<c:min val="${fixed.min}"/>` : "")
     : spec.includeZero === false || !o.values ? "" : zeroScaling(o.values);
-  return `<c:valAx><c:axId val="${id}"/><c:scaling><c:orientation val="minMax"/>${scale}</c:scaling><c:delete val="${o.deleted ? 1 : 0}"/>` +
+  return `<c:valAx><c:axId val="${id}"/><c:scaling><c:orientation val="${o.reversed ? "maxMin" : "minMax"}"/>${scale}</c:scaling><c:delete val="${o.deleted ? 1 : 0}"/>` +
     `<c:axPos val="${pos}"/>${grid}${title(o.title, spec.font, pos === "l" || pos === "r")}` +
     `<c:numFmt formatCode="${esc(o.tickFmt || axisFmt(o.numFmt || "General", o.values))}" sourceLinked="0"/><c:majorTickMark val="none"/>` +
     `<c:minorTickMark val="none"/><c:tickLblPos val="${o.lowLabels ? "low" : "nextTo"}"/><c:spPr><a:ln><a:noFill/></a:ln></c:spPr>` +
@@ -437,10 +475,11 @@ export function plotAreaXml(spec, refs, plot = null, axisPlot = null) {
     return group +
       valAxis(spec, AX.cat, AX.val, { pos: "b", crosses: "autoZero", title: spec.axesHidden || spec.xAxisHidden ? null : spec.xTitle,
         numFmt: spec.xNumFmt, tickFmt: spec.xAxisNumFmt, midCat: true, grid: spec.xGridlines !== false, lowLabels: true, values: spec.series.flatMap(s => s.x),
-        fixed: fit.x || { min: spec.xMin, max: spec.xMax }, deleted: spec.axesHidden || spec.xAxisHidden, majorUnit: spec.xMajorUnit }) +
+        fixed: fit.x || { min: spec.xMin, max: spec.xMax }, deleted: spec.axesHidden || spec.xAxisHidden, majorUnit: spec.xMajorUnit, reversed: spec.xReversed }) +
       valAxis(spec, AX.val, AX.cat, { pos: "l", crosses: "autoZero", title: spec.axesHidden || spec.valueAxisHidden ? null : spec.valueTitle,
         numFmt: spec.numFmt, tickFmt: spec.valueAxisNumFmt, midCat: true, lowLabels: true, values: spec.series.flatMap(s => s.y),
-        fixed: fit.y || { min: spec.valueMin, max: spec.valueMax }, deleted: spec.axesHidden || spec.valueAxisHidden, majorUnit: spec.valueMajorUnit });
+        fixed: fit.y || { min: spec.valueMin, max: spec.valueMax }, deleted: spec.axesHidden || spec.valueAxisHidden, majorUnit: spec.valueMajorUnit,
+        reversed: spec.valueReversed });
   }
   // labels written over the bars (waterfall steps): as Tableau, a label that would overlap one already
   // placed is left out – positions estimated from the plot size and the axis range
@@ -477,12 +516,13 @@ export function plotAreaXml(spec, refs, plot = null, axisPlot = null) {
     const ax = g.secondary ? `<c:axId val="${AX.cat2}"/><c:axId val="${AX.val2}"/>` : `<c:axId val="${AX.cat}"/><c:axId val="${AX.val}"/>`;
     const sers = g.items.join("");
     if (g.type === "bar") {
-      const grouping = spec.stacked ? "stacked" : "clustered";
+      const grouping = spec.percent ? "percentStacked" : spec.stacked ? "stacked" : "clustered";
+      const gap = g.secondary && spec.secondaryGapWidth !== undefined ? spec.secondaryGapWidth : spec.gapWidth ?? 60;
       return `<c:barChart><c:barDir val="${spec.barDir || "col"}"/><c:grouping val="${grouping}"/><c:varyColors val="0"/>${sers}` +
-        `<c:gapWidth val="${spec.gapWidth ?? 60}"/>${spec.stacked ? '<c:overlap val="100"/>' : ""}${ax}</c:barChart>`;
+        `<c:gapWidth val="${gap}"/>${spec.stacked || spec.overlap ? '<c:overlap val="100"/>' : ""}${ax}</c:barChart>`;
     }
     if (g.type === "area") {
-      return `<c:areaChart><c:grouping val="${spec.stacked ? "stacked" : "standard"}"/><c:varyColors val="0"/>${sers}${ax}</c:areaChart>`;
+      return `<c:areaChart><c:grouping val="${spec.percent ? "percentStacked" : spec.stacked ? "stacked" : "standard"}"/><c:varyColors val="0"/>${sers}${ax}</c:areaChart>`;
     }
     // box plot: high-low lines = whiskers, up/down bars between first (Q1) and last (Q3) series = box
     const box = spec.boxPlot
@@ -490,26 +530,34 @@ export function plotAreaXml(spec, refs, plot = null, axisPlot = null) {
         `<c:upDownBars><c:gapWidth val="${spec.gapWidth ?? 80}"/>` +
         `<c:upBars><c:spPr>${solid(spec.boxPlot.color, 35000)}${line(spec.boxPlot.color, 12700)}</c:spPr></c:upBars>` +
         `<c:downBars><c:spPr>${solid(spec.boxPlot.color, 35000)}${line(spec.boxPlot.color, 12700)}</c:spPr></c:downBars></c:upDownBars>`
-      : "";
+      : spec.hiLowLines ? `<c:hiLowLines><c:spPr>${line(spec.hiLowLines.color, 19050)}</c:spPr></c:hiLowLines>` : "";
     return `<c:lineChart><c:grouping val="standard"/><c:varyColors val="0"/>${sers}${box}<c:marker val="1"/>${ax}</c:lineChart>`;
   }).join("");
   const axisValues = secondary => spec.series.filter(s => !!s.secondary === secondary).flatMap(s => s.values);
   // reference lines across horizontal bars: XY lines on hidden x2 / y2 axes, x2 pinned to the bars' value range
   let overlay = "", overlayAxes = "";
-  if (spec.barDir === "bar" && spec.refLines && spec.refLines.length && fixed.min !== undefined && fixed.max !== undefined) {
+  const targets = spec.barDir === "bar" && spec.targets ? 1 : 0;
+  const dots = spec.barDir === "bar" && spec.overlay ? spec.overlay : [];
+  if (spec.barDir === "bar" && ((spec.refLines && spec.refLines.length) || targets || dots.length) && fixed.min !== undefined && fixed.max !== undefined) {
+    const k0 = spec.series.length + (spec.refLines || []).length + targets;
     overlay = `<c:scatterChart><c:scatterStyle val="lineMarker"/><c:varyColors val="0"/>` +
-      spec.refLines.map((rl, i) => refLineXY(spec, rl, spec.series.length + i)).join("") +
+      (spec.refLines || []).map((rl, i) => refLineXY(spec, rl, spec.series.length + i)).join("") +
+      (targets ? targetTicksXY(spec, spec.series.length + (spec.refLines || []).length) : "") +
+      dots.map((o, j) => overlayXY(spec, o, k0 + j)).join("") +
       `<c:axId val="${AX.x2}"/><c:axId val="${AX.y2}"/></c:scatterChart>`;
     overlayAxes = hiddenValAx(AX.x2, AX.y2, "t", fixed.min, fixed.max) + hiddenValAx(AX.y2, AX.x2, "r", 0, 1);
   }
   let axes = catAxis(spec, AX.cat, AX.val, { deleted: spec.categoryAxisHidden, rot: (spec.categoryRotation || 0) * 60000 }) +
     valAxis(spec, AX.val, AX.cat, { title: spec.valueAxisHidden ? null : spec.valueTitle, numFmt: spec.numFmt, values: axisValues(false),
-                                    fixed, deleted: spec.valueAxisHidden, majorUnit: unit, tickFmt: spec.valueAxisNumFmt });
+                                    fixed, deleted: spec.valueAxisHidden, majorUnit: unit, tickFmt: spec.valueAxisNumFmt,
+                                    reversed: spec.valueReversed });
   if (hasSecondary) {
     axes += catAxis(spec, AX.cat2, AX.val2, { deleted: true }) +
       valAxis(spec, AX.val2, AX.cat2, { pos: spec.barDir === "bar" ? "t" : "r", crosses: "max", grid: false,
         title: spec.secondaryAxisHidden ? null : spec.secondaryTitle, numFmt: spec.secondaryNumFmt || spec.numFmt, values: axisValues(true),
-        deleted: spec.secondaryAxisHidden, tickFmt: spec.secondaryAxisNumFmt });
+        deleted: spec.secondaryAxisHidden, tickFmt: spec.secondaryAxisNumFmt,
+        // synchronized: the same range as the primary axis, so both measures are drawn to one scale
+        ...(spec.secondarySync ? { fixed, majorUnit: unit } : {}) });
   }
   return xml + overlay + axes + overlayAxes;
 }

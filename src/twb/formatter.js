@@ -122,6 +122,14 @@ export function createSheetFormatter(model, sheetName, onlyPanes) {
     return best;
   }
 
+  /* summary-data column id ("[federated.x].[pcto:sum:Sales:qk:2]") → the sheet's field ref; null when the id is not
+   * a field instance of this sheet */
+  function matchFieldId(id) {
+    const r = id && /^\[/.test(String(id)) ? tfParseFieldRef(id) : null;
+    if (!r || !r.type || !sheet) return null;
+    return sheet.fieldRefs.find(x => x.inner.toLowerCase() === r.inner.toLowerCase()) || null;
+  }
+
   function onShelf(ref, shelf) { return !!ref && (sheet ? sheet[shelf] : []).some(r => tfSameField(r, ref)); }
   // headers = DISCRETE pills on Rows/Columns; continuous pills (…:qk) draw axes, not headers
   function isHeaderField(ref) { return !!ref && ref.type !== "qk" && (onShelf(ref, "rows") || onShelf(ref, "cols")); }
@@ -156,6 +164,7 @@ export function createSheetFormatter(model, sheetName, onlyPanes) {
   return {
     hasModel: !!sheet,
     matchName,
+    matchFieldId,
     isHeaderField,
 
     titleText() { return sheet && sheet.title ? sheet.title.text : null; },

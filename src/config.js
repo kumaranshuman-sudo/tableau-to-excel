@@ -25,6 +25,8 @@ export const FORMAT_CONFIG = {
   sheetGridlines: false,          // Excel's cell grid on the dashboard sheet – Tableau dashboards have none
   printFitToWidth: true,          // printing / PDF: the dashboard one page wide, landscape when it is wider than tall
   tableauTextScale: null,         // Tableau label text vs its pixels (Windows display scaling) for pie label placement; null = the browser's devicePixelRatio
+  conversionReport: true,         // a "Conversion Report" sheet: every visual, how it was converted (NATIVE … TABLE_FALLBACK) and why
+  fallbackNotes: true,            // a note on each visual exported as its data table, naming the Tableau visual and the reason
   debug: false                    // true: dump the parsed workbook model and [Format] traces to the console
 };
 

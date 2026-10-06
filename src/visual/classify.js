@@ -45,7 +45,14 @@ export function tvIsMeasureRef(model, ref) {
   if (ref.type !== "qk") return false;
   if (TV_DATE_DERIVS.has(String(ref.deriv || "").toLowerCase())) return false;
   const info = tfFieldInfo(model, ref) || {};
+  if (info.bin || /\(bin\)$/i.test(ref.name)) return false;           // a bin draws the histogram's category axis
   return !(info.role === "dimension" && /^date/i.test(info.datatype || ""));
+}
+
+/** a measure that is one number (MIN(0), AVG(1)): it only places marks or labels @param {FormatModel | null} model @param {FieldRef} ref */
+export function tvIsConstantRef(model, ref) {
+  const info = ref && tfFieldInfo(model, ref);
+  return !!info && info.constant !== undefined && !info.param;
 }
 
 /* what the TWB shelves say about the view: value axes, continuous dimension axes, geography,
@@ -64,13 +71,16 @@ export function visualShelfShape(sheet, model) {
     filled: encoded("geometry"),
     shelfFields: all.filter(r => r.name !== "Measure Names").length,
     size: encoded("size"),
-    binned: all.some(r => /\(bin\)$/i.test(r.name)),
+    binned: all.some(r => /\(bin\)$/i.test(r.name) || !!(tfFieldInfo(model, r) || {}).bin),
     countAxis: all.some(r => tvIsMeasureRef(model, r) && /^(cnt|ctd)$/i.test(r.deriv || "")),
     numericDiscreteDim: all.some(r => r.type === "ok" && !TV_DATE_DERIVS.has(String(r.deriv || "").toLowerCase()) &&
                                       /^(integer|real)$/i.test(datatype(r))),
     runningTotal: all.some(r => /^(cum|rsum)$/i.test(r.deriv || "") ||
                                 (sheet.runningTotals || []).some(t => tfSameField(t, r))),
     boxPlot: !!sheet.boxPlot,
+    // a measure on Color and nothing on Text / Label: Tableau's Automatic mark is a square (heat map)
+    colorMeasure: sheet.panes.some(p => p.encodings.some(e => e.channel === "color" && tvIsMeasureRef(model, e.field))),
+    text: sheet.panes.some(p => p.labelRuns.length || p.encodings.some(e => e.channel === "text" || e.channel === "label")),
     // a date on the shelves (discrete MONTH(…) or continuous) → Tableau's Automatic mark is a line
     dateDimension: all.some(r => !tvIsMeasureRef(model, r) && (TV_DATE_DERIVS.has(String(r.deriv || "").toLowerCase()) ||
                                                               (/^date/i.test(datatype(r)) && r.type !== "nk"))),
@@ -91,6 +101,16 @@ export function liveSpecShape(spec) {
   };
 }
 
+/** Tableau's Automatic mark for the view's shelves: what an Automatic marks card draws
+ * @param {ReturnType<typeof visualShelfShape>} shape @returns {string} */
+export function tvAutomaticMark(shape) {
+  return !shape ? "" : shape.geo ? "map" : shape.rowMeasures && shape.colMeasures ? "circle"
+    : shape.rowMeasures || shape.colMeasures ? (shape.binned ? "bar" : shape.continuousDimension || shape.dateDimension ? "line" : "bar")
+    : shape.shelfFields === 0 && shape.size ? "square"                    // empty shelves + Size → treemap
+    : shape.colorMeasure && !shape.text ? "square"                         // dimensions only, a measure on Color → heat map
+    : "text";
+}
+
 /* mark type: live visual spec (current state) → TWB pane marks → Tableau's "Automatic" rules */
 /** @param {any} spec live visual spec @param {ViewModel} vm @param {FormatModel | null} model */
 export function resolveVisualMarks(spec, vm, model) {
@@ -98,19 +118,38 @@ export function resolveVisualMarks(spec, vm, model) {
   const shape = visualShelfShape(sheet, model);
   let tokens = visualSpecMarkTokens(spec);
   let source = tokens.length ? "live" : "none";
+  const automatic = () => tvAutomaticMark(shape);
   if (!tokens.length && sheet) {
-    tokens = [...new Set(sheet.panes.map(p => normalizeVisualToken(p.markClass)).filter(t => t && t !== "automatic"))];
+    // the marks drawn: every pane with an id when the sheet has several (the id-less "All" pane draws nothing)
+    const drawn = sheet.panes.length > 1 && sheet.panes.some(p => p.id) ? sheet.panes.filter(p => p.id) : sheet.panes;
+    tokens = [...new Set(drawn.map(p => normalizeVisualToken(p.markClass)).filter(t => t && t !== "automatic"))];
+    // Automatic panes beside text / shape panes draw Tableau's automatic mark (bars of a butterfly chart beside its
+    // label column): the chart mark comes first, text last
+    const auto = automatic();
+    if (tokens.length && tokens.every(t => /^(text|shape|circle|square)$/.test(t)) && /^(bar|line)$/.test(auto) &&
+        drawn.some(p => !normalizeVisualToken(p.markClass) || normalizeVisualToken(p.markClass) === "automatic")) tokens.push(auto);
+    tokens.sort((a, b) => Number(a === "text") - Number(b === "text"));
     if (tokens.length) source = "twb";
   }
   if (!tokens.length && shape) {
     source = "automatic";
-    if (shape.geo) tokens = ["map"];
-    else if (shape.rowMeasures && shape.colMeasures) tokens = ["circle"];
-    else if (shape.rowMeasures || shape.colMeasures) tokens = [shape.continuousDimension || shape.dateDimension ? "line" : "bar"];
-    else if (shape.shelfFields === 0 && shape.size) tokens = ["square"];   // empty shelves + Size → treemap
-    else tokens = ["text"];
+    tokens = [automatic()];
   }
   return { tokens, shape, source };
+}
+
+/**
+ * Rounded bars: a line from a constant (MIN(0)) to each value, one per member, drawn thick with round caps –
+ * Line mark, Measure Names on Path, the constant among Measure Values.
+ * @param {ViewModel} vm @param {FormatModel | null} model
+ */
+export function isRoundedBar(vm, model) {
+  const sheet = vm.fmt && vm.fmt.sheetModel;
+  if (!sheet) return false;
+  const path = sheet.panes.some(p => /^line$/i.test(p.markClass || "") && p.encodings.some(e => e.channel === "path" && e.field.name === "Measure Names"));
+  const mv = [...sheet.rows, ...sheet.cols].some(r => r.name === "Multiple Values");
+  const circles = sheet.panes.some(p => /^(circle|shape)$/i.test(p.markClass || ""));
+  return path && mv && !circles && sheet.fieldRefs.some(r => tvIsConstantRef(model, r));
 }
 
 /**
@@ -135,47 +174,74 @@ export function isMarkTable(vm, model) {
   });
 }
 
-/** @param {any} spec live visual spec @param {ViewModel} vm @param {FormatModel | null} model @returns {VisualType} */
-export function classifyVisualType(spec, vm, model) {
-  const { tokens, shape } = resolveVisualMarks(spec, vm, model);
+/**
+ * @param {any} spec live visual spec @param {ViewModel} vm @param {FormatModel | null} model
+ * @param {string[]} [ev] collects the evidence behind the decision (shown in the conversion report)
+ * @returns {VisualType}
+ */
+export function classifyVisualType(spec, vm, model, ev = []) {
+  const { tokens, shape, source } = resolveVisualMarks(spec, vm, model);
   const live = liveSpecShape(spec);
   const axes = shape ? shape.rowMeasures + shape.colMeasures : null;     // null → unknown (no workbook)
   const token = tokens[0] || "";
+  ev.push(tokens.length ? `${tokens.join(" + ")} mark${tokens.length > 1 ? "s" : ""} (${source === "twb" ? "workbook" : source === "live" ? "live view" : "Tableau's automatic mark"})` : "no mark type known");
+  if (shape) ev.push(`${shape.rowMeasures} measure axis on Rows, ${shape.colMeasures} on Columns`);
+  const kpiOrTable = why => {
+    const kpi = isKPIViewModel(vm);
+    ev.push(why, kpi ? "one row of a few values: a KPI" : "drawn as cells");
+    return kpi ? VISUAL_TYPES.KPI : VISUAL_TYPES.TABLE;
+  };
   // generated lat/long on the shelves: a map whatever the mark (circle → symbol map)
   if (shape && shape.geo) {
-    return shape.filled || tokens.some(t => t === "multipolygon" || t === "polygon") ? VISUAL_TYPES.MAP_FILLED : VISUAL_TYPES.MAP;
+    ev.push("generated latitude / longitude on the shelves: a map");
+    const filled = shape.filled || tokens.some(t => t === "multipolygon" || t === "polygon");
+    if (filled) ev.push(shape.filled ? "geometry encoding: filled areas" : "polygon marks");
+    return filled ? VISUAL_TYPES.MAP_FILLED : VISUAL_TYPES.MAP;
   }
-  if (axes && isMarkTable(vm, model)) return isKPIViewModel(vm) ? VISUAL_TYPES.KPI : VISUAL_TYPES.TABLE;
+  if (axes && isMarkTable(vm, model)) return kpiOrTable("every axis is a constant that only places the marks: a table built from marks");
   if (tokens.includes("text") && tokens.every(t => /^(text|shape|circle|square)$/.test(t))) {
-    return isKPIViewModel(vm) ? VISUAL_TYPES.KPI : VISUAL_TYPES.TABLE;      // KPI tiles / buttons built from marks
+    return kpiOrTable("text marks");                                  // KPI tiles / buttons built from marks
   }
   const cartesian = tokens.filter(t => t === "bar" || t === "line" || t === "area");
-  if (new Set(cartesian).size > 1) return VISUAL_TYPES.COMBO;
-  if (token === "ganttbar" || token === "gantt") {
-    return shape && shape.runningTotal ? VISUAL_TYPES.WATERFALL : VISUAL_TYPES.GANTT;
+  if (new Set(cartesian).size > 1) { ev.push("different marks per axis: a combination chart"); return VISUAL_TYPES.COMBO; }
+  if (token === "line" && isRoundedBar(vm, model)) {
+    ev.push("a thick line from a constant to each value (Path: Measure Names): rounded bars");
+    return VISUAL_TYPES.BAR;
   }
-  if (shape && shape.boxPlot && axes > 0) return VISUAL_TYPES.BOXPLOT;
+  if (token === "ganttbar" || token === "gantt") {
+    if (shape && shape.runningTotal) { ev.push("Gantt bars on a running total: a waterfall"); return VISUAL_TYPES.WATERFALL; }
+    ev.push("Gantt bars: start on the axis, length from Size");
+    return VISUAL_TYPES.GANTT;
+  }
+  if (shape && shape.boxPlot && axes > 0) { ev.push("box plot reference distribution (Analytics pane)"); return VISUAL_TYPES.BOXPLOT; }
   const byMark = {
     bar: VISUAL_TYPES.BAR, line: VISUAL_TYPES.LINE, area: VISUAL_TYPES.AREA, pie: VISUAL_TYPES.PIE,
     map: VISUAL_TYPES.MAP, multipolygon: VISUAL_TYPES.MAP_FILLED, polygon: VISUAL_TYPES.MAP_FILLED,
     heatmap: VISUAL_TYPES.MAP, density: VISUAL_TYPES.MAP,               // density marks: Tableau-only visual
     vizextension: VISUAL_TYPES.CUSTOM
   };
-  if (token === "bar" && axes === 0) return isKPIViewModel(vm) ? VISUAL_TYPES.KPI : VISUAL_TYPES.TABLE;
+  if (token === "bar" && axes === 0) return kpiOrTable("bar marks without a measure axis");
   if (token === "bar" && ((shape && (shape.binned || (shape.countAxis && shape.numericDiscreteDim))) || (live && live.binned))) {
+    ev.push(shape && shape.binned || live && live.binned ? "a bin field on the category axis: a histogram" : "counts per numeric value: a histogram");
     return VISUAL_TYPES.HISTOGRAM;
   }
-  if (byMark[token]) return byMark[token];
+  if (byMark[token]) {
+    ev.push(token === "vizextension" ? "a viz extension draws this sheet" : /^(heatmap|density)$/.test(token) ? "density marks" : `${token} marks`);
+    return byMark[token];
+  }
   if (token === "circle" || token === "shape" || token === "square") {
     // nothing on Rows/Columns + Size → Tableau lays the marks out itself: treemap / packed bubbles
     const free = shape ? shape.shelfFields === 0 && shape.size : live ? live.shelfFields === 0 && live.size : false;
-    if (free) return token === "square" ? VISUAL_TYPES.TREEMAP : VISUAL_TYPES.BUBBLE;
-    if (axes === null) return token === "circle" ? VISUAL_TYPES.SCATTER : VISUAL_TYPES.TABLE;
-    if (shape.rowMeasures && shape.colMeasures) return VISUAL_TYPES.SCATTER;
-    if (axes > 0) return VISUAL_TYPES.LINE;                              // dot plot: markers on one axis
-    return token === "square" ? VISUAL_TYPES.HEATMAP : VISUAL_TYPES.TABLE;
+    if (free) {
+      ev.push("nothing on Rows / Columns and a Size measure: Tableau packs the marks itself");
+      return token === "square" ? VISUAL_TYPES.TREEMAP : VISUAL_TYPES.BUBBLE;
+    }
+    if (axes === null) { ev.push("no workbook: guessed from the mark"); return token === "circle" ? VISUAL_TYPES.SCATTER : VISUAL_TYPES.TABLE; }
+    if (shape.rowMeasures && shape.colMeasures) { ev.push("a measure on both axes: a scatter plot"); return VISUAL_TYPES.SCATTER; }
+    if (axes > 0) { ev.push("marks along one measure axis: a dot plot"); return VISUAL_TYPES.LINE; }
+    if (token === "square") { ev.push("square marks in a grid of dimensions: a heat map"); return VISUAL_TYPES.HEATMAP; }
+    return kpiOrTable(`${token} marks in a grid of dimensions`);
   }
-  if (!token && vm.kind === "chart") return VISUAL_TYPES.UNKNOWN;
-  if (isKPIViewModel(vm)) return VISUAL_TYPES.KPI;
-  return VISUAL_TYPES.TABLE;
+  if (!token && vm.kind === "chart") { ev.push("chart without a known mark"); return VISUAL_TYPES.UNKNOWN; }
+  return kpiOrTable(token ? `${token} marks` : "no chart marks");
 }

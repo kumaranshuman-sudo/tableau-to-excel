@@ -57,7 +57,7 @@ function splitTableCalcColumns(cols, rows, fmt) {
   const groups = new Map();
   cols.forEach((c, i) => { if (c.ref) { const k = tfNorm(c.name); groups.set(k, [...(groups.get(k) || []), i]); } });
   groups.forEach(idx => {
-    if (idx.length < 2 || !fmt.hasModel) return;
+    if (idx.length < 2 || !fmt.hasModel || idx.every(i => cols[i].exact)) return;
     const calcs = fmt.tableCalcRefs(cols[idx[0]].ref);
     if (!calcs.length) return;
     const nums = i => rows.map(r => tfDvNum(r[i])).filter(v => v !== null);
@@ -87,9 +87,12 @@ export function buildViewModel(model, sheetName, summary, opts = {}) {
   const fmt = createSheetFormatter(model, sheetName);
   const notes = [];
   /** @type {ViewColumn[]} */
+  // a column's field: its id when Tableau gives one ("[ds].[pcto:sum:Sales:qk]" – exact, even for table
+  // calculations captioned like their measure), else its caption ("SUM(Sales)")
   let cols = (summary.columns || []).map((c, i) => {
     const name = c.fieldName || c.fieldId || `Col${i + 1}`;
-    return { name, dataType: c.dataType, ref: fmt.matchName(name) };
+    const byId = fmt.matchFieldId(c.fieldId);
+    return { name, dataType: c.dataType, ref: byId || fmt.matchName(name), exact: !!byId };
   });
   let rows = (summary.data || []).map(r => r.slice());
   splitTableCalcColumns(cols, rows, fmt);

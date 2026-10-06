@@ -1,11 +1,12 @@
 /* Entry point: visual model → Excel chart specs (throws when not representable). */
 import { tvApplyWorkbookAxes } from "./axes.js";
 import { tvApplyReferenceLines } from "./reflines.js";
-import { tvCartesianSpecs, tvHistogramSpecs } from "./cartesian.js";
+import { tvCartesianSpecs, tvHistogramSpecs, tvNoteApproximations } from "./cartesian.js";
 import { tvMarkToken } from "./common.js";
 import { tvRoles } from "./roles.js";
 import { tvBoxPlotSpec, tvGanttSpec, tvPackedBubbleSpec, tvPieSpec, tvScatterSpec, tvTreemapSpec, tvWaterfallSpec } from "./specialized.js";
 import { VISUAL_TYPES } from "../../config.js";
+import { isRoundedBar, tvAutomaticMark, visualShelfShape } from "../../visual/classify.js";
 
 /* ══════════════════════════════════════════════════════════════════════════
  * TABLEAU VISUAL → EXCEL CHART SPECS
@@ -30,7 +31,9 @@ export function buildExcelChartSpecs(visualModel, model) {
   const roles = tvRoles(vm, model, visualModel.source && visualModel.source.visualSpec);
   const markToken = visualModel.metadata.markToken || "";
   /** @type {ChartContext} */
-  const ctx = { vm, roles, markToken, type: visualModel.type };
+  const ctx = { vm, roles, markToken, type: visualModel.type, model,
+                autoMark: tvAutomaticMark(visualShelfShape(vm.fmt && vm.fmt.sheetModel, model)),
+                roundedBar: visualModel.type === VISUAL_TYPES.BAR && isRoundedBar(vm, model) };
   if (roles.source === "summary" && /^(circle|shape|square)$/.test(markToken)) {
     throw new Error("mark layout unknown – load the workbook file for this visual");
   }
@@ -46,9 +49,13 @@ export function buildExcelChartSpecs(visualModel, model) {
     specs = tvPieSpec(ctx);
   } else if (visualModel.type === VISUAL_TYPES.SCATTER && roles.rows.values.length && roles.cols.values.length) {
     specs = tvScatterSpec(ctx);
+  } else if (visualModel.type === VISUAL_TYPES.LINE && roles.rows.values.length && roles.cols.values.length &&
+             ![...roles.rows.values, ...roles.cols.values].some(v => v.mv)) {
+    specs = tvScatterSpec(ctx, { lines: true });         // a line of one measure against another (a Pareto curve)
   } else {
     specs = tvCartesianSpecs(ctx);
   }
-  specs.forEach(s => { s.name = visualModel.metadata.worksheetName; s.rolesSource = roles.source; tvApplyWorkbookAxes(s, ctx); tvApplyReferenceLines(s, ctx); });
+  specs.forEach(s => { s.name = visualModel.metadata.worksheetName; s.rolesSource = roles.source; tvApplyWorkbookAxes(s, ctx); tvApplyReferenceLines(s, ctx);
+                       tvNoteApproximations(s, ctx); });
   return specs;
 }

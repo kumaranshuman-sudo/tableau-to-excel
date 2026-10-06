@@ -1,6 +1,7 @@
 /* View model + classification → visual model, and renderer selection. */
 import { FORMAT_CONFIG, VISUAL_TYPES } from "../config.js";
 import { classifyVisualType, isMarkTable, resolveVisualMarks } from "./classify.js";
+import { checkLossless, pivotMatrix } from "./matrix.js";
 import { buildViewModel } from "./view-model.js";
 
 /**
@@ -14,8 +15,14 @@ export function buildVisualModel(model, sheetName, summary, opts = {}) {
   const vm = buildViewModel(model, sheetName, summary, opts);
   const spec = opts.visualSpec || null;
   const marks = resolveVisualMarks(spec, vm, model);
-  const type = classifyVisualType(spec, vm, model);
+  const evidence = [];
+  const type = classifyVisualType(spec, vm, model, evidence);
   vm.markTable = (type === VISUAL_TYPES.TABLE || type === VISUAL_TYPES.KPI) && isMarkTable(vm, model);
+  // drawn as cells: a heat map / crosstab as Tableau's matrix, and never a table that drops what its marks show
+  if (type === VISUAL_TYPES.HEATMAP || type === VISUAL_TYPES.TABLE) {
+    if (pivotMatrix(vm, model)) evidence.push("dimensions on Rows and Columns, one mark per cell: a matrix");
+    else checkLossless(vm, model);
+  }
   const dimensions = vm.order.filter(i => vm.cols[i].isHeader).map(i => vm.cols[i]);
   const measures = vm.order.filter(i => !vm.cols[i].isHeader).map(i => vm.cols[i]);
   return {
@@ -42,7 +49,8 @@ export function buildVisualModel(model, sheetName, summary, opts = {}) {
         typeof tableau.extensions.createVizImageAsync === "function"
     },
     viewModel: vm,
-    diagnostics: []
+    diagnostics: [],
+    evidence
   };
 }
 

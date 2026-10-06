@@ -4,9 +4,11 @@ import { tableauToExcelNumFmt, tfWrapNumFmt } from "../../format/number-format.j
 import { tfSameField } from "../../twb/field-ref.js";
 
 /* Edit Axis → the spec: fixed range ("fixed" / "fixedmin" / "fixedmax"), tick spacing, include zero */
-function applySpace(spec, s, axis) {
+function applySpace(spec, s, axis, noReverse = false) {
   const key = name => axis === "x" ? "x" + name : "value" + name;
   if (s.majorSpacing) spec[key("MajorUnit")] = s.majorSpacing;
+  // e.g. a bump chart: rank 1 at the top (a butterfly's reversed wing is negated instead)
+  if (s.reverse && !spec.mirrored && !noReverse) spec[axis === "x" ? "xReversed" : "valueReversed"] = true;
   if (/^fixed(min)?$/.test(s.rangeType || "") && s.min !== undefined) spec[key("Min")] = s.min;
   if (/^fixed(max)?$/.test(s.rangeType || "") && s.max !== undefined) spec[key("Max")] = s.max;
   if (s.domainExpand === "false" && axis !== "x") spec.includeZero = false;
@@ -83,7 +85,13 @@ export function tvApplyWorkbookAxes(spec, ctx) {
     if (second.title !== undefined) spec.secondaryTitle = second.title;
   }
   if (!fmt.gridlinesShown(valueShelf)) spec.gridlines = false;
-  if (refs[0]) applySpace(spec, fmt.axisSpace(refs[0], valueShelf, "0"), "value");
+  // one axis reversed beside another that is not (nor synchronized to it) mirrors two panes – a centred funnel, a
+  // butterfly – which one Excel axis cannot: the reversal is left out
+  const mirror = refs.length > 1 && refs.slice(1).some(r => {
+    const s = fmt.axisSpace(r, valueShelf, tfSameField(r, refs[0]) ? "1" : "0");
+    return !s.reverse && !s.synchronized;
+  });
+  if (refs[0]) applySpace(spec, fmt.axisSpace(refs[0], valueShelf, "0"), "value", mirror);
   spec.valueAxisNumFmt = axisNumFmt(fmt, refs[0]);
   if (refs[1]) spec.secondaryAxisNumFmt = axisNumFmt(fmt, refs[1]);
   applyLabels(spec, fmt, refs);

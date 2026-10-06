@@ -105,8 +105,12 @@ export function tvPieSpec(ctx) {
   return [spec];
 }
 
-/** @param {ChartContext} ctx @returns {ChartSpec[]} */
-export function tvScatterSpec(ctx) {
+/**
+ * @param {ChartContext} ctx
+ * @param {{ lines?: boolean }} [opts] lines: a Line mark with a measure on both axes – the points joined in order of x
+ * @returns {ChartSpec[]}
+ */
+export function tvScatterSpec(ctx, opts = {}) {
   const { vm, roles } = ctx;
   const xm = roles.cols.values[0], ym = roles.rows.values[0];
   const scale = tvColorScale(vm, roles, ctx.markToken);
@@ -114,6 +118,7 @@ export function tvScatterSpec(ctx) {
                  valueTitle: tvMeasureLabel(vm, ym.ci), xTitle: tvMeasureLabel(vm, xm.ci) });
   const point = r => ({ x: tfDvNum(r[xm.ci]), y: tfDvNum(r[ym.ci]) });
   const rows = vm.rows.filter(r => { const p = point(r); return p.x !== null && p.y !== null; });
+  if (opts.lines) rows.sort((a, b) => point(a).x - point(b).x || point(a).y - point(b).y);
   if (rows.length > TV_MAX_POINTS) throw new Error(`${rows.length} marks – too many for an Excel scatter chart`);
   const colorCi = roles.color && !roles.color.measureNames ? roles.color.ci : -1;
   // Label = a dimension (store name …) → Excel "value from cells" labels with that text, when
@@ -123,23 +128,29 @@ export function tvScatterSpec(ctx) {
   const textLabels = labelDim >= 0 && rows.length <= 40;
   const labels = textLabels || measureLabel || (labelDim < 0 && tvLabelsOn(roles, ym.ref));
   const labelOf = r => tvText(r[labelDim]);
+  // a Size measure is part of the meaning (Tableau's circles sized by it): Excel's bubble chart, area = size
+  const sizeCi = !opts.lines && roles.size >= 0 && !vm.cols[roles.size].isHeader ? roles.size : -1;
+  const sizeOf = r => { const n = tfDvNum(r[sizeCi]); return n === null ? null : Math.abs(n); };
   if (colorCi >= 0 && !roles.color.continuous) {
     const values = tvColorValues(vm, roles);
     if (values.length > TV_MAX_SERIES) throw new Error("too many colour values for an Excel chart");
     spec.series = values.map((v, i) => {
-      const pts = rows.filter(r => tvText(r[colorCi]) === v).map(point);
+      const own = rows.filter(r => tvText(r[colorCi]) === v), pts = own.map(point);
       return { name: v, color: (scale && scale(v)) || tvHex(TABLEAU_10[i % TABLEAU_10.length]),
-               x: pts.map(p => p.x), y: pts.map(p => p.y), labels,
-               labelTexts: textLabels ? rows.filter(r => tvText(r[colorCi]) === v).map(labelOf) : undefined };
+               x: pts.map(p => p.x), y: pts.map(p => p.y), labels, ...(opts.lines ? { line: true } : {}),
+               ...(sizeCi >= 0 ? { size: own.map(sizeOf) } : {}),
+               labelTexts: textLabels ? own.map(labelOf) : undefined };
     });
   } else {
     const pts = rows.map(point);
     spec.series = [{
       name: tvMeasureLabel(vm, ym.ci), color: tvMarkColor(roles), x: pts.map(p => p.x), y: pts.map(p => p.y), labels,
+      ...(opts.lines ? { line: true } : {}), ...(sizeCi >= 0 ? { size: rows.map(sizeOf) } : {}),
       labelTexts: textLabels ? rows.map(labelOf) : undefined,
       pointColors: colorCi >= 0 && scale ? rows.map(r => scale(tfDvNum(r[colorCi]))) : undefined
     }];
   }
+  if (sizeCi >= 0) Object.assign(spec, { kind: "bubble", sizeTitle: tvMeasureLabel(vm, sizeCi), sizeNumFmt: tvNumFmt(vm, sizeCi) });
   spec.legend = spec.series.length > 1;
   return [spec];
 }
@@ -210,6 +221,8 @@ export function tvWaterfallSpec(ctx) {
   return [{
     // Tableau's Gantt bars float thin, about as wide as the gaps between them
     ...tvBaseSpec(vm), kind: "bar", barDir: horizontal ? "bar" : "col", stacked: true, gapWidth: 100, legend: false,
+    conversion: { strategy: "CONSTRUCTED", output: "Waterfall: stacked columns on an invisible running base",
+                  note: "built from stacked columns (invisible base, increases, decreases) so Tableau's step colours and labels stay – Excel's own waterfall cannot colour each step" },
     // "Allow labels to overlap other marks" off (Tableau's default): overlapping labels are left out
     labelCull: !roles.panes.some(p => tvPaneRule(p, "mark", "mark-labels-cull") === "false"),
     categories: { names: catDims.length ? catDims.map(d => tvMeasureLabel(vm, d.ci)) : [""], levels: cats.levels },
@@ -249,6 +262,8 @@ export function tvBoxPlotSpec(ctx) {
   const boxColor = tvMarkColor(roles);
   return [{
     ...tvBaseSpec(vm), kind: "line", boxPlot: { color: boxColor }, legend: false, includeZero: false,
+    conversion: { strategy: "CONSTRUCTED", output: "Box plot: quartile boxes (up/down bars), whiskers (high-low lines), median marks",
+                  note: "Tableau's quartiles and 1.5 × IQR whiskers computed from the marks – Excel's box & whisker chart would compute its own statistics" },
     categories: { names: catDims.length ? catDims.map(d => tvMeasureLabel(vm, d.ci)) : [""], levels: cats.levels },
     categoryTitle: catDims.map(d => tvMeasureLabel(vm, d.ci)).join(" / "),
     numFmt: tvNumFmt(vm, measure.ci), valueTitle: tvMeasureLabel(vm, measure.ci),
@@ -321,6 +336,8 @@ export function tvGanttSpec(ctx) {
   const dateFmt = axisMax - axisMin > 400 ? "mmm yyyy" : "d mmm yyyy";
   return [{
     ...tvBaseSpec(vm), kind: "bar", barDir: "bar", stacked: true, gapWidth: 40, legend: false,
+    conversion: { strategy: "CONSTRUCTED", output: "Gantt: stacked bars with invisible gaps on a date axis",
+                  note: "Excel has no Gantt chart: each bar starts at its date and lasts its Size, the gaps before it invisible" },
     valueMin: axisMin, valueMax: axisMax, includeZero: false,
     categories: { names: catDims.length ? catDims.map(d => tvMeasureLabel(vm, d.ci)) : [""], levels: cats.levels },
     categoryTitle: catDims.map(d => tvMeasureLabel(vm, d.ci)).join(" / "),

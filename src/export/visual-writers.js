@@ -269,6 +269,8 @@ export function writeRegularTable(worksheet, vm, originRow, originCol, rangeTrac
         if (plan.enc.applyTo === "fill") extra.fill = rowColor;
         else if (!p.explicitColor) extra.fontColor = rowColor;
       }
+      const cellColor = vm.cellFill ? vm.cellFill(rowIdx, ci) : null;     // a matrix: each cell its own mark's colour
+      if (cellColor) extra.fill = cellColor;
       let dv = row[ci];
       const text = tfDvText(dv);
       if (mk && !tfIsNull(dv)) {
