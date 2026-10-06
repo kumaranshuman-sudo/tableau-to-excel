@@ -7,7 +7,6 @@ export const PX_PER_COL  = 90;
 
 export const PX_PER_ROW  = 20;          // one Excel row (15 pt): dashboard y maps 1:1 onto the sheet
 
-export const TITLE_ROWS  = 1;
 
 export const COL_GAP     = 0;
 
@@ -43,8 +42,8 @@ export const EDGE_MERGE_PX = 6;
  * Excel columns from the dashboard's own zone edges: every left / right edge of a laid-out block is a column
  * boundary, so each column is as wide (px) as the gap between two edges and every block spans exactly its
  * zone – positions and widths as on the dashboard, whatever the content. A table zone gets one column per
- * field: at the widths the table draws (splitPx, from the zone's left edge; scaled down only when they would
- * run past the zone), else split by relative widths.
+ * field: at the widths the table draws (splitPx, from the zone's left edge; running into free space beside
+ * the zone, and scaled down only when that is not enough), else split by relative widths.
  * @param {{ layout?: any, split?: number[], splitPx?: number[] }[]} items
  * @returns {{ colPx: number[], span: (item: any) => { gridCol: number, gridW: number } | null }}
  */
@@ -61,20 +60,51 @@ export function buildColumnGrid(items) {
   let edges = merge(laid.flatMap(sideOf));
   const nearest = v => edges.reduce((best, e, i) => Math.abs(e - v) < Math.abs(edges[best] - v) ? i : best, 0);
   const extra = [];
-  /** @type {[number, number[]][]} a table's span and its own column edges */
-  const tables = [];
+  // tables starting at the same left edge (stacked tables) share their columns, each as wide as the widest
+  // of them at that position – a column per field that fits every table's values
+  /** @type {Map<number, { R: number, widths: number[], area: number, members: any[] }>} */
+  const stacks = new Map();
   laid.forEach(it => {
-    if (it.splitPx && it.splitPx.length) {
-      const [l, r] = sideOf(it), L = edges[nearest(l)], R = edges[nearest(r)];
-      const total = it.splitPx.reduce((a, b) => a + b, 0);
-      const k = total > R - L ? (R - L) / total : 1;
-      let at = L;
-      const own = [L];
-      it.splitPx.forEach(w => { at += w * k; own.push(Math.round(at)); });
-      extra.push(...own);
-      tables.push([L, own]);
-      return;
-    }
+    if (!it.splitPx || !it.splitPx.length) return;
+    const [l, r] = sideOf(it), L = edges[nearest(l)], R = edges[nearest(r)];
+    const s = stacks.get(L) || { R, widths: [], area: 0, members: [] };
+    s.R = Math.max(s.R, R);
+    s.area += it.layout.widthPx * (it.layout.heightPx || 1);
+    s.members.push(it);
+    it.splitPx.forEach((w, i) => { s.widths[i] = Math.max(s.widths[i] || 0, w); });
+    stacks.set(L, s);
+  });
+  const rowsOverlap = (a, b) => a.layout.yPx < b.layout.yPx + (b.layout.heightPx || 0) - 2 &&
+                                b.layout.yPx < a.layout.yPx + (a.layout.heightPx || 0) - 2;
+  /* how far a table may run to the right: up to the next block beside it (sharing its rows) – a table's
+     columns keep their widths as long as there is room, like the backup's, instead of being squeezed */
+  const roomRight = (R, members) => {
+    let limit = Infinity;
+    laid.forEach(o => {
+      if (members.includes(o)) return;
+      const [l] = sideOf(o);
+      if (l >= R - EDGE_MERGE_PX && members.some(m => rowsOverlap(m, o))) limit = Math.min(limit, Math.max(R, l));
+    });
+    return limit;
+  };
+  // one sheet, one set of columns: where tables overlap horizontally the larger one keeps its columns, and a
+  // smaller table inside its span writes into those columns rather than cutting them
+  /** @type {[number, number[]][]} a table stack's left edge and its own column edges */
+  const tables = [];
+  [...stacks.entries()].sort((a, b) => b[1].area - a[1].area).forEach(([L, { R, widths, members }]) => {
+    const total = widths.reduce((a, b) => a + b, 0);
+    const room = roomRight(R, members) - L;                            // squeezed only when that is not enough
+    const k = total > room ? room / total : 1;
+    let at = L;
+    const own = [L];
+    widths.forEach(w => { at += w * k; own.push(Math.round(at)); });
+    const free = own.filter(e => !tables.some(([L2, o2]) => e > L2 + 2 && e < o2[o2.length - 1] - 2 && !o2.some(x => Math.abs(x - e) <= 2)));
+    if (free.length < 2) return;                                        // entirely inside a larger table
+    extra.push(...free);
+    tables.push([free[0], free]);
+  });
+  laid.forEach(it => {
+    if (it.splitPx && it.splitPx.length) return;
     if (!it.split || it.split.length < 2) return;
     const [l, r] = sideOf(it), L = edges[nearest(l)], R = edges[nearest(r)];
     if (edges.filter(e => e > L && e < R).length + 1 >= it.split.length) return;
@@ -83,10 +113,12 @@ export function buildColumnGrid(items) {
     it.split.slice(0, -1).forEach(w => { at += (R - L) * w / total; extra.push(Math.round(at)); });
   });
   edges = merge([...edges, ...extra], 2);
-  // inside a table only its own column edges: another block's edge there would cut a field's column in two
+  // inside a table only table column edges: another block's edge there would cut a field's column in two
+  // (a table's own edges are never dropped for another table's)
+  const tableEdges = tables.flatMap(([, own]) => own);
   tables.forEach(([L, own]) => {
     const end = own[own.length - 1];
-    edges = edges.filter(e => e <= L || e >= end || own.some(o => Math.abs(o - e) <= 2));
+    edges = edges.filter(e => e <= L || e >= end || tableEdges.some(o => Math.abs(o - e) <= 2));
   });
   const colPx = edges.slice(1).map((e, i) => e - edges[i]);
   return {
@@ -240,7 +272,8 @@ export function isGroupedTable(item) {
  */
 export function headerRowSpan(vm) {
   if (!vm.showHeaderRow) return 0;
-  const hpx = vm.fmt && vm.fmt.headerRowHeightPx ? vm.fmt.headerRowHeightPx() : 0;
+  // Tableau's stored header height, else the height of the dashboard text boxes drawn as the headers
+  const hpx = (vm.fmt && vm.fmt.headerRowHeightPx ? vm.fmt.headerRowHeightPx() : 0) || vm.headerPx || 0;
   return hpx ? Math.max(1, Math.round(hpx / PX_PER_ROW)) : 1;
 }
 
@@ -256,6 +289,11 @@ export function setTableVisibleRows(items) {
     const start = tableDataStart(t);
     const end = t.gridRow + t.allocatedRows;
     let need = ROW_GROUP_THRESHOLD;
+    // the rows Tableau shows in the zone (at the sheet's own row height) stay visible
+    if (t.layout && t.layout.heightPx) {
+      const headPx = ((t.vm.showTitle ? 1 : 0) + headerRowSpan(t.vm)) * PX_PER_ROW;
+      need = Math.max(need, Math.floor((t.layout.heightPx - headPx) / (t.vm.fmt.rowHeightPx() || PX_PER_ROW)));
+    }
     items.forEach(o => {
       if (o === t || isGroupedTable(o)) return;
       const oEnd = o.gridRow + (o.allocatedRows || o.rowCount || 0);

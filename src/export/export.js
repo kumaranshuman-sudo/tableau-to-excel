@@ -1,16 +1,18 @@
 /* The export: Tableau dashboard → formatted XLSX with native charts. */
 import ExcelJS from "exceljs";
 import { buildExcelChartSpecs } from "../charts/model/index.js";
+import { buildPieCharts, buildPieModel, writePieData } from "../charts/model/pie.js";
 import { FORMAT_CONFIG, TABLEAU_DEFAULTS, TF_ELEMENTS, VISUAL_TYPES } from "../config.js";
 import { writeDashboardTitle, writeIndividualFilterTable } from "./cell-writers.js";
 import { CHART_DATA_SHEET, EXCEL_ROW_PX, OBJECT_KIND, PX_PER_COL, PX_PER_ROW, ROW_GAP, buildColumnGrid, buildLayoutMap, getExcelColumnName, graphicBox, makeRangeTracker, resolveCollisions, setTableVisibleRows, tableDataStart, viewModelHeight } from "./layout.js";
-import { extractFilterValuesPerField, fetchAllSheetsData, isFilterValueWorksheet } from "./sheet-data.js";
-import { applyAutoFilters, setColumnWidths, tableColumnPx, writeKPICardStacked, writeRegularTable, writeTableauTitle } from "./visual-writers.js";
+import { extractFilterValuesPerField, fetchAllSheetsData, fetchSelectedMarks, isFilterValueWorksheet } from "./sheet-data.js";
+import { applyAutoFilters, setColumnWidths, tableColumnPx, writeKPICardStacked, writeLegendBlock, writeRegularTable, writeTableauTitle } from "./visual-writers.js";
 import { KPI_GUTTER, buildKpiCard, buildTextCard, writeKpiCard } from "./kpi-card.js";
 import { tfStrokeToBorder, tfZoneText } from "../twb/dashboard-text.js";
 import { tfExcelFill } from "../format/excel-style.js";
 import { tfDashboardTitleRuns } from "../twb/dashboard-text.js";
 import { tfCollect, tfDashboardShading, tfMerge } from "../twb/formatter.js";
+import { tfParseFieldRef, tfSameField } from "../twb/field-ref.js";
 import { backgroundPlan } from "./backgrounds.js";
 import { appendExportStatus, setExportStatus, updateVisualStatus } from "../ui/status.js";
 import { chooseSaveTarget, ensureFormatModel, formatModelFileName, getTitleMap, getWorkbookImages } from "../ui/workbook-store.js";
@@ -79,6 +81,33 @@ export async function exportToExcel() {
     /** @type {ExportItem[]} */
     const dataWorksheetItems = [];
     const visualStatuses = [];
+    /** sheets drawn inside a donut's hole (its centre text): not exported as blocks of their own */
+    const pieCentreSheets = new Set();
+    /** @type {ExportItem[]} colour legends of pies, drawn at their dashboard position */
+    const pieLegendItems = [];
+    /* A pie's colour legends shown on the dashboard (the chart has none of its own): the TWB legend zones of the
+       sheet, matched to each ring by the field they show, laid out at their dashboard position. TWB zones use
+       0–100000 units: they are mapped to API pixels through the sheet's own zone. */
+    /** @returns {ExportItem[]} */
+    const pieLegends = (pie, sheetName, vm) => {
+      const dashM = fmtModel && fmtModel.dashboards && fmtModel.dashboards[dashboard.name];
+      const sheetZone = dashM && dashM.zones.find(z => z.type === "worksheet" && z.name === sheetName && z.w && z.h);
+      const api = (dashboard.objects || []).find(o => o.type === "worksheet" && o.name === sheetName && o.size);
+      if (!sheetZone || !api) return [];
+      const zones = dashM.zones.filter(z => z.type === "color" && z.name === sheetName && !z.hidden);
+      const sx = api.size.width / sheetZone.w, sy = api.size.height / sheetZone.h;
+      return [pie, pie.inner].filter(s => s && s.legend).map((s, i) => {
+        const z = zones.find(z => s.colorRef && z.param && tfSameField(tfParseFieldRef(z.param), s.colorRef)) || (i === 0 && zones.length === 1 ? zones[0] : null);
+        if (!z) return null;
+        const key = `legend:${z.id}`;
+        const obj = { type: "worksheet", name: key, id: z.id, isVisible: true,
+                      position: { x: api.position.x + (z.x - sheetZone.x) * sx, y: api.position.y + (z.y - sheetZone.y) * sy },
+                      size: { width: z.w * sx, height: z.h * sy } };
+        const layout = buildLayoutMap([...(dashboard.objects || []), obj], titleMap).get(key);
+        return layout ? { type: /** @type {"legend"} */ ("legend"), name: key, visualName: s.legend.title, layout, legend: s.legend, fmt: vm.fmt, columns: [],
+                          rowCount: 1 + s.legend.items.length } : null;
+      }).filter(Boolean);
+    };
 
     for (const { sheet, data, visualSpec, visualSpecError, error } of allSheetsData) {
       if (error) {
@@ -156,7 +185,24 @@ export async function exportToExcel() {
           spec: visualModel.source.visualSpec
         });
         let renderDecision = chooseVisualRenderer(visualModel);
-        if (renderDecision.renderer === "excel-chart") {
+        // a pie or donut (one or two layers): drawn the way Tableau draws it – slices, labels, hole, tooltips
+        if (fmtModel && FORMAT_CONFIG.nativeCharts && visualModel.viewModel.fmt.pieLayers()) {
+          const pie = buildPieModel(fmtModel, sheet.name, summaryData, {
+            dashboardName: dashboard.name, selectedTables: await fetchSelectedMarks(sheet),
+            dataOf: name => (allSheetsData.find(x => x.sheet.name === name) || { data: null }).data
+          });
+          if (pie) {
+            visualModel.pie = pie;
+            visualModel.type = VISUAL_TYPES.PIE;
+            renderDecision = VISUAL_RENDERERS.chart;
+            if (pie.centerText) {                              // the text drawn in the hole is not exported again
+              if (pie.centerText.name) pieCentreSheets.add(pie.centerText.name);
+              else visualModel.viewModel.headerZoneIds.push(pie.centerText.id);
+            }
+            pieLegendItems.push(...pieLegends(pie, sheet.name, visualModel.viewModel));
+          }
+        }
+        if (renderDecision.renderer === "excel-chart" && !visualModel.pie) {
           try {
             visualModel.chartSpecs = buildExcelChartSpecs(visualModel, fmtModel);
             // Tableau draws legends as separate dashboard cards, never inside the view: the chart keeps a
@@ -330,7 +376,8 @@ export async function exportToExcel() {
     });
     if (imageItems.length || overlayImages.length) console.log(`[Images] ${imageItems.length + overlayImages.length} image(s)`);
 
-    const allItems = [...filterValueItems, ...dataWorksheetItems, ...textItems, ...imageItems];
+    const allItems = [...filterValueItems, ...dataWorksheetItems.filter(it => !pieCentreSheets.has(it.name)),
+                      ...textItems, ...imageItems, ...pieLegendItems];
 
     if (allItems.length === 0) {
       throw new Error("No data found in any visible worksheet.");
@@ -351,7 +398,9 @@ export async function exportToExcel() {
     const placedItems = allItems.map((item, idx) => {
       const span = grid.span(item);
       if (item.layout && span) {
-        return { ...item, gridRow: item.layout.gridRow, gridCol: span.gridCol, gridW: span.gridW, allocatedRows: item.rowCount };
+        // a table covers every column it writes (it may run past its zone into free space)
+        const gridW = item.splitPx ? Math.max(span.gridW, item.splitPx.length) : span.gridW;
+        return { ...item, gridRow: item.layout.gridRow, gridCol: span.gridCol, gridW, allocatedRows: item.rowCount };
       }
       if (item.layout) {
         const l = item.layout;
@@ -479,20 +528,45 @@ setTableVisibleRows(placedItems);
       return 1;
     };
 
+    /** @type {{ item: ExportItem, top: number, panes: Map<string, any> }[]} pies, laid out with the final column widths */
+    const pieJobs = [];
+    const chartDataSheetOf = () => {
+      if (!chartDataSheet) {
+        const name = CHART_DATA_SHEET === sheetName ? CHART_DATA_SHEET + " (export)" : CHART_DATA_SHEET;
+        chartDataSheet = workbook.addWorksheet(name, { state: "hidden" });
+      }
+      return chartDataSheet;
+    };
+
     for (let i = 0; i < adjustedItems.length; i++) {
       const item = adjustedItems[i];
+
+      if (item.visualModel && item.visualModel.pie) {
+        const status = visualStatuses.find(entry => entry.worksheet === item.name);
+        const titleRows = writeGraphicTitle(item);
+        const data = writePieData(chartDataSheetOf(), chartDataRow + 1, item.visualModel.pie, item.name);
+        chartDataRow = data.nextRow - 1;
+        pieJobs.push({ item, top: item.gridRow + titleRows, panes: data.panes });
+        reserveGraphicBlock(item);
+        const pie = item.visualModel.pie;
+        item.visualModel.status = "success";
+        item.visualModel.statusReason = `native Excel ${pie.hole || pie.inner ? "donut" : "pie"} chart with Tableau labels and tooltips`;
+        if (status) { status.status = "success"; status.reason = item.visualModel.statusReason; }
+        continue;
+      }
+
+      if (item.type === "legend") {
+        writeLegendBlock(worksheet, item, tracker, colWidths);
+        continue;
+      }
 
       if (item.visualModel && item.visualModel.renderer === "excel-chart") {
         const status = visualStatuses.find(entry => entry.worksheet === item.name);
         const titleRows = writeGraphicTitle(item);
         const specs = item.visualModel.chartSpecs;
         const paneH = Math.floor(item.box.heightPx / specs.length);     // separate panes stack vertically
-        if (!chartDataSheet) {
-          const name = CHART_DATA_SHEET === sheetName ? CHART_DATA_SHEET + " (export)" : CHART_DATA_SHEET;
-          chartDataSheet = workbook.addWorksheet(name, { state: "hidden" });
-        }
         specs.forEach((spec, k) => {
-          const refs = ExcelChartWriter.writeChartData(chartDataSheet, spec, chartDataRow);
+          const refs = ExcelChartWriter.writeChartData(chartDataSheetOf(), spec, chartDataRow);
           chartDataRow = refs.nextRow;
           const offPx = k * paneH;
           chartJobs.push({
@@ -777,7 +851,24 @@ setTableVisibleRows(placedItems);
     let buffer = await workbook.xlsx.writeBuffer();
     // fit-to-page next to collapsed row groups: ExcelJS writes <sheetPr> out of order – put it right
     if (worksheet.pageSetup.fitToPage && worksheet.properties.outlineProperties) buffer = await fixSheetProperties(buffer);
-    if (chartJobs.length) {
+    // pies and donuts: Tableau's pane cells inside the block, now that its px size is known; slices link back
+    // to the block's first cell (a click on a tooltip wedge follows the link)
+    /** @type {ChartJob[]} */
+    const pieChartJobs = [];
+    pieJobs.forEach(({ item, top, panes }) => {
+      let w = 0, h = 0;
+      for (let c = item.gridCol; c < item.gridCol + item.gridW; c++) w += colPx(c);
+      for (let r = top; r < item.gridRow + item.allocatedRows; r++) h += rowPx(r);
+      const bg = (item.vm.fmt.tableBackground() || "FFFFFFFF").slice(2);
+      const link = `#'${worksheet.name.replace(/'/g, "''")}'!${worksheet.getCell(top + 1, item.gridCol + 1).address}`;
+      buildPieCharts(item.visualModel.pie, { w, h }, panes, { name: item.visualName || item.name, bg, link }).forEach(c => {
+        const at = nativeAnchor(item.gridCol, top, c.x, c.y, colPx, rowPx);
+        pieChartJobs.push({ spec: /** @type {any} */ ({ kind: "pie" }), refs: /** @type {any} */ (null), item, name: c.name,
+          col: at.nativeCol, row: at.nativeRow, colOffPx: at.nativeColOff / 9525, rowOffPx: at.nativeRowOff / 9525,
+          widthPx: c.w, heightPx: c.h, xml: c.xml, shapes: c.shapes, tips: c.tips });
+      });
+    });
+    if (chartJobs.length || pieChartJobs.length) {
       // fit every chart to its own block now that the final column widths/row heights are known:
       // tables widen the columns, so a chart kept at its Tableau pixel size would end short of the
       // tables / charts aligned with it on the dashboard → stretch it to the block's edges
@@ -796,8 +887,8 @@ setTableVisibleRows(placedItems);
         job.heightPx = Math.max(20, job.pane === job.panes - 1 ? h - job.pane * paneH : paneH);
       });
       try {
-        buffer = await ExcelChartWriter.injectCharts(buffer, { sheetIndex: 0, charts: chartJobs });
-        console.log(`[Charts] ${chartJobs.length} native Excel chart(s) added`);
+        buffer = await ExcelChartWriter.injectCharts(buffer, { sheetIndex: 0, charts: [...chartJobs, ...pieChartJobs] });
+        console.log(`[Charts] ${chartJobs.length + pieChartJobs.length} native Excel chart(s) added`);
       } catch (err) {
         console.error("[Charts] could not add native charts", err);
         chartJobs.forEach(job => {

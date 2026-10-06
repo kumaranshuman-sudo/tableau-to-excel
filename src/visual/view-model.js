@@ -1,11 +1,53 @@
 /* Summary data → view model (pivot, merge, sort, visible columns, titles). */
 import { FORMAT_CONFIG } from "../config.js";
 import { tfDvNum, tfDvText, tfIsNull, tfNaturalCompare } from "../data/values.js";
-import { tfTextBoxHeaders } from "../twb/dashboard-text.js";
-import { tfExtractRefs, tfSameField } from "../twb/field-ref.js";
+import { tfTextBoxHeaderStrip, tfTextBoxHeaders } from "../twb/dashboard-text.js";
+import { tfExtractRefs, tfRefKey, tfSameField } from "../twb/field-ref.js";
 import { createSheetFormatter } from "../twb/formatter.js";
 import { tfBucketKey } from "../twb/parser.js";
 import { tfLog, tfNorm } from "../util.js";
+
+/**
+ * Dashboard text boxes over a table built from marks, where one box can head several panes (e.g. a
+ * diverging bar split into a negative and a positive axis): adjacent value columns whose panes are coloured
+ * by the same field share a box. Matched only when the groups and the boxes line up one to one; the row
+ * headers take the width left of the first box. Sets the columns' labels, widths and header spans.
+ * @param {any} dash @param {string} sheetName @param {ViewColumn[]} cols @param {number[]} order
+ * @param {SheetFormatter} fmt @returns {{ ids: string[], headerPx: number } | null}
+ */
+function markTableHeaders(dash, sheetName, cols, order, fmt) {
+  const strip = tfTextBoxHeaderStrip(dash, sheetName);
+  if (!strip || !dash.width) return null;
+  const panes = fmt.panesInOrder();
+  const colourOf = ci => {
+    const p = panes.find(x => x.refs.some(r => tfSameField(r, cols[ci].ref)));
+    const e = p && p.pane.encodings.find(x => x.channel === "color" && x.field);
+    return e ? tfRefKey(e.field) : null;
+  };
+  const values = order.filter(ci => !cols[ci].isHeader), heads = order.filter(ci => cols[ci].isHeader);
+  /** @type {{ key: string | null, cols: number[] }[]} */
+  const groups = [];
+  values.forEach(ci => {
+    const key = colourOf(ci), last = groups[groups.length - 1];
+    if (last && key && last.key === key) last.cols.push(ci); else groups.push({ key, cols: [ci] });
+  });
+  if (groups.length !== strip.zones.length) return null;
+  const px = units => units / 100000 * dash.width;
+  groups.forEach((g, k) => {
+    const z = strip.zones[k], first = cols[g.cols[0]];
+    first.label = z.text;
+    first.labelProps = z.props;
+    first.labelRuns = z.runs;
+    first.headerSpan = g.cols.length;
+    g.cols.forEach((ci, j) => {
+      if (j) { cols[ci].label = ""; cols[ci].headerCovered = true; }
+      cols[ci].zoneWidthPx = px(z.w) / g.cols.length;
+    });
+  });
+  const left = px(strip.zones[0].x - strip.ws.x);
+  if (heads.length && left > 0) heads.forEach(ci => { cols[ci].zoneWidthPx = left / heads.length; });
+  return { ids: strip.zones.map(z => z.id), headerPx: Math.max(...strip.zones.map(z => z.h)) / 100000 * (dash.height || 0) };
+}
 
 /* Tableau names a quick table calculation after its measure: a running sum and the plain sum both arrive as
  * "SUM(Value Ordered)". Of the columns sharing a name, the one holding the calculation takes the sheet's
@@ -225,6 +267,7 @@ export function buildViewModel(model, sheetName, summary, opts = {}) {
   // ── dashboard text boxes drawn as column headers (strict match, else captions stay) ──
   const dashM = model && opts.dashboardName && model.dashboards && model.dashboards[opts.dashboardName];
   let headerZoneIds = [];
+  let headerPx = 0;
   if (FORMAT_CONFIG.textBoxHeaders && dashM && !labelsRows) {
     const tb = tfTextBoxHeaders(dashM, sheetName, order.length);
     if (tb) {
@@ -236,6 +279,13 @@ export function buildViewModel(model, sheetName, summary, opts = {}) {
       });
       headerZoneIds = tb.zones.map(z => z.id);
       notes.push(`headers from ${tb.zones.length} dashboard text boxes`);
+    } else {
+      const grouped = markTableHeaders(dashM, sheetName, cols, order, fmt);
+      if (grouped) {
+        headerZoneIds = grouped.ids;
+        headerPx = grouped.headerPx;
+        notes.push(`headers from ${grouped.ids.length} dashboard text boxes over grouped panes`);
+      }
     }
   }
   const showHeaderRow = order.some(i => cols[i].label);
@@ -253,7 +303,7 @@ export function buildViewModel(model, sheetName, summary, opts = {}) {
 
   if (notes.length) tfLog(`View model "${sheetName}": ${notes.join("; ")}`);
   return {
-    fmt, cols, rows, order, notes, showHeaderRow, title, showTitle, headerZoneIds,
+    fmt, cols, rows, order, notes, showHeaderRow, title, showTitle, headerZoneIds, headerPx,
     dashboardName: opts.dashboardName,
     kind: fmt.isChart() ? "chart" : "table",
     headerOrder: sortLevels.map(l => l.ci)          // all header cols (incl. hidden) outer → inner

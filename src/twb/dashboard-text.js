@@ -12,14 +12,21 @@ export const TF_ZONE_TOL = 1500;
 export function tfZoneText(z) { return (z.runs || []).map(r => r.text).join("").replace(/\u00C6\r?\n?/g, "\n").trim(); }
 
 export function tfTextBoxHeaders(dash, sheetName, nCols) {
+  const strip = tfTextBoxHeaderStrip(dash, sheetName);
+  if (!strip || nCols < 2 || strip.zones.length !== nCols) return null;
+  return strip;
+}
+
+/* the row of text boxes sitting on a worksheet's top edge, left to right (≥ 2), whatever their number */
+export function tfTextBoxHeaderStrip(dash, sheetName) {
   const ws = dash.zones.find(z => z.name === sheetName && z.type === "worksheet");
-  if (!ws || nCols < 2) return null;
+  if (!ws) return null;
   const near = (a, b) => Math.abs(a - b) <= TF_ZONE_TOL;
   const cand = dash.zones.filter(z => z.type === "text" && !z.hidden && z.runs && tfZoneText(z) &&
     near(z.y + z.h, ws.y) && z.x >= ws.x - TF_ZONE_TOL && z.x + z.w <= ws.x + ws.w + TF_ZONE_TOL);
-  if (cand.length !== nCols || !cand.every(z => near(z.y, cand[0].y))) return null;
+  if (cand.length < 2 || !cand.every(z => near(z.y, cand[0].y))) return null;
   cand.sort((a, b) => a.x - b.x);
-  return { zones: cand.map(z => ({ id: z.id, text: tfZoneText(z), w: z.w,
+  return { ws, zones: cand.map(z => ({ id: z.id, text: tfZoneText(z), x: z.x, w: z.w, h: z.h, runs: z.runs,
     props: (z.runs.find(r => r.text.trim()) || { props: {} }).props })) };
 }
 

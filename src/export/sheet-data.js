@@ -89,6 +89,18 @@ export async function extractFilterValuesPerField(sheets) {
   return result;
 }
 
+/** The marks selected on a sheet (a selected pie slice is outlined, as Tableau shows it); [] when unavailable.
+ * @param {any} sheet Tableau worksheet @returns {Promise<any[]>} */
+export async function fetchSelectedMarks(sheet) {
+  try {
+    const marks = typeof sheet.getSelectedMarksAsync === "function" ? await sheet.getSelectedMarksAsync() : null;
+    return (marks && marks.data) || [];
+  } catch (e) {
+    console.warn(`[Export] selected marks of "${sheet.name}" unavailable: ${e.message}`);
+    return [];
+  }
+}
+
 /* ── Check if worksheet is a filter value table ───────────────────────── */
 export function isFilterValueWorksheet(sheetName, summaryData) {
   if (/filter[_\- ]?\d+/i.test(sheetName) || 
