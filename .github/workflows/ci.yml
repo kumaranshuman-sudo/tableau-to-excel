@@ -17,13 +17,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Syntax check
+        run: node --check build_table_copy.js
 
-      - name: Type check
-        run: npm run typecheck
-
-      - name: Build extension
-        run: npm run build
+      - name: Page and manifest
+        run: |
+          grep -q 'src="./build_table_copy.js"' index.html
+          grep -q 'src="./js/tableau.extensions.1.latest.js"' index.html
+          test -f js/tableau.extensions.1.latest.js
+          grep -q '<source-location>' Export.trex

@@ -4,7 +4,7 @@
 
 [![Repository](https://img.shields.io/badge/GitHub-kumaranshuman--sudo-181717?style=flat-square&logo=github)](https://github.com/kumaranshuman-sudo/tableau-to-excel)
 [![Runtime](https://img.shields.io/badge/Runtime-Tableau%20Desktop-1C1C1C?style=flat-square)](https://www.tableau.com/products/desktop)
-[![Build](https://img.shields.io/badge/Build-esbuild-FFCF00?style=flat-square)](https://esbuild.github.io/)
+[![Build](https://img.shields.io/badge/Build-none%20(one%20file)-FFCF00?style=flat-square)](#repository-layout)
 
 ## What it solves
 
@@ -23,6 +23,8 @@ The exporter recognises what each visual is from its shelves, marks and encoding
 A correct table always beats a misleading chart: a visual is never drawn as an Excel chart that merely looks similar. Every export adds a **Conversion Report** sheet listing each visual, the Tableau visual it is, the strategy, the Excel output, the fidelity, the reason and the evidence it was recognised from, plus the filters and parameters the data reflects. A visual exported as data carries a cell note with the same reason.
 
 Dashboard formatting – palettes, number formats, layout and workbook styles – is applied throughout.
+
+On Tableau Cloud the workbook is loaded automatically through a small backend (Worker) and every visible dashboard of the workbook can be exported in one go, one Excel sheet per dashboard.
 
 ## Architecture
 
@@ -58,45 +60,32 @@ Renderer-neutral chart model
 - **Renderer-neutral chart model:** separates Tableau visual interpretation from Excel DrawingML generation.
 - **Native chart generation:** supported visuals become editable Excel charts.
 - **Formatting pipeline:** palettes, number formats, dimensions and workbook styles are resolved before writing.
-- **Local dependency bundling:** ExcelJS and JSZip are bundled into the extension; runtime CDN dependencies are avoided.
-- **Type checking:** JSDoc-based checks validate shared shapes in `src/types.d.ts`.
-
-## Setup
-
-Requires Node.js 18 or later.
-
-```bash
-npm install
-```
+- **Tableau Cloud auto-load:** the backend resolves which published workbook holds the dashboard and serves its XML; the Personal Access Token stays on the backend.
+- **Every dashboard in one export:** the other dashboards are read through hidden Embedding API views in the viewer's own Tableau session (row-level security applies), one Excel sheet each.
+- **No build step:** the whole extension is one script, `build_table_copy.js`, loaded by `index.html` next to ExcelJS and JSZip.
 
 ## Run it in Tableau Desktop
 
-```bash
-npm run serve
-```
+Serve the repository folder on `http://localhost:5500` – the URL in `Export.trex` – with any static server (for example VS Code **Live Server**, or `npx http-server -p 5500 -c-1`). In Tableau, add an Extension object to a dashboard and choose **Access Local Extensions → Export.trex** (or **Reload** an existing one).
 
-Builds the extension into `dist/`, rebuilds on every change under `src/`, and serves `dist/` on `http://localhost:5500/index.html` – the URL in `Export.trex`. In Tableau, add an Extension object to a dashboard and choose **Access Local Extensions → Export.trex** (or **Reload** an existing one).
+In the panel, **📁 Load workbook file manually** reads the dashboard's `.twbx` (or `.twb`) for its formatting. Load the packaged `.twbx` to also export logos, custom shapes and other images: a `.twb` does not contain them. **All dashboards** (ticked by default) exports every visible dashboard of the workbook, one sheet each; untick it to export only this dashboard.
 
-`npm run build` makes a one-off build.
+## Tableau Cloud
 
-In the panel, **Load Workbook** reads the dashboard's `.twbx` (or `.twb`) for its formatting. Load the packaged `.twbx` to also export logos, custom shapes and other images: a `.twb` does not contain them.
+1. Host the backend (Worker) that holds the Tableau Personal Access Token: `/resolve` names the published workbook a dashboard belongs to, `/twb/<id>` returns its XML.
+2. Set `DEFAULT_BACKEND_URL` in `build_table_copy.js` (section `cloud/backend.js`), or enter the URL and key under **Advanced: backend connection** in the panel – they are saved with the workbook.
+3. The workbook then loads automatically when the extension opens; the 📁 button stays as the fallback. The first multi-dashboard export may ask the viewer to sign in to Tableau once.
 
 ## Deploy
 
-```bash
-npm run build
-```
-
-1. Host the contents of `dist/` on any HTTPS web server (Tableau requires HTTPS for non-localhost extensions). `dist/` is self-contained: ExcelJS and JSZip are bundled, nothing loads from a CDN.
+1. Host the repository files (`index.html`, `build_table_copy.js`, `js/`) on any HTTPS web server (Tableau requires HTTPS for non-localhost extensions). ExcelJS 4.4 and JSZip 3.10 load from their CDNs.
 2. In `Export.trex`, set `<source-location><url>` to the hosted `index.html`, and raise `extension-version` for each release.
 3. Tableau Server / Cloud: add the URL to the extension allow list (Settings → Extensions).
 4. Hand out the updated `Export.trex`; users add it through **Access Local Extensions**.
 
-The bundle name carries a content hash (`extension.<hash>.js`), so browsers never run a stale copy.
-
 ## How an export runs
 
-`export/export.js` → `exportToExcel()` drives one export:
+Everything below lives in `build_table_copy.js`; each `═══ <path> ═══` banner there starts the module named here. `export/export.js` → `exportToExcel()` drives one export, calling `writeDashboardSheet()` once per dashboard:
 
 1. **Read** – every worksheet's summary data from Tableau (`export/sheet-data.js`) and the dashboard objects' positions; the loaded workbook's format model (`twb/parser.js`, cached by `ui/workbook-store.js`).
 2. **Model** – per worksheet a view model (`visual/view-model.js`: pivot, sort, visible columns, headers), a visual type with the evidence for it (`visual/classify.js`), heat maps and crosstabs pivoted into Tableau's matrix (`visual/matrix.js`), then a renderer (`visual/visual-model.js`): cells, a native chart, an image or a data table. Summary columns are matched to the workbook's fields by Tableau's field id (`fieldId`), else by caption.
@@ -111,30 +100,22 @@ What the chart model reads from the workbook, beyond shelves and marks: Dual Axi
 
 Adding support for a new kind of visual usually means a rule in `visual/classify.js` and either a chart spec builder in `charts/model/` or a cell writer in `export/`; a construction or approximation names itself in `spec.conversion` so the report says what it is.
 
-Settings that change the output are in `src/config.js` (`FORMAT_CONFIG`): `conversionReport` (the report sheet), `fallbackNotes` (notes on visuals exported as data), `chartPolicy` and more; `debug: true` logs the parsed workbook model and formatting traces to the browser console.
+Settings that change the output are in the `config.js` section (`FORMAT_CONFIG`): `conversionReport` (the report sheet), `fallbackNotes` (notes on visuals exported as data), `chartPolicy` and more; `debug: true` logs the parsed workbook model and formatting traces to the browser console.
 
 ## Repository layout
 
 ```text
+index.html                extension panel: loads the Tableau library, ExcelJS, JSZip and build_table_copy.js
+build_table_copy.js       the whole extension, one section per module:
+                            format/ config util twb/   parsing and the formatting cascade
+                            data/ visual/              view model, matrix pivot, classification, semantics, strategy
+                            charts/model/ writer/      renderer-neutral chart specs → DrawingML / chartex parts
+                            export/                    layout, workbook writing, Conversion Report, Visual Data sheet
+                            ui/ cloud/                 panel status, workbook storage, backend auto-load, other dashboards
+                            main.js                    panel wiring
+js/                       Tableau Extensions API library
 Export.trex               extension manifest (points Tableau at the hosted index.html)
-src/
-  main.js                 startup and Tableau extension wiring
-  config.js               formatting configuration and visual types
-  util.js                 small shared helpers (XML, numbers, logging, file names)
-  twb/                    TWB/TWBX parsing and formatting cascade
-  data/                   summary-data values and ordering
-  format/                 palettes, colour scales, number formats and ExcelJS styles
-  visual/                 view model, matrix pivot, classification, semantics, conversion strategy, renderer selection
-  charts/model/           visual model → renderer-neutral Excel chart specs (pie.js: pies and donuts)
-  charts/writer/          chart specs → DrawingML / chartex parts (pie.js: pie parts, label shapes, tooltip wedges)
-  export/                 dashboard layout, data fetching, workbook writing, Conversion Report and Visual Data sheets
-  ui/                     panel status and workbook storage
-  types.d.ts              shared type definitions (not bundled)
-  index.html              extension panel template (the build inserts the hashed bundle name)
-js/                       Tableau Extensions API library (copied into dist/)
-scripts/build.mjs         esbuild bundle + development server
-dist/                     build output – what gets deployed (not in git)
-.github/workflows/ci.yml  CI: install, type check and build on every push / pull request
+.github/workflows/ci.yml  CI: syntax check of build_table_copy.js, page and manifest checks
 ```
 
 ## Current scope and limitations
@@ -154,8 +135,7 @@ The project should be evaluated against representative dashboards containing the
 ## Development
 
 ```bash
-npm run typecheck
-npm run build
+node --check build_table_copy.js
 ```
 
 For regression testing, use representative Tableau workbooks and verify:
