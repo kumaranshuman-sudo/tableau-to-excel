@@ -55,7 +55,8 @@ export function buildExcelChartSpecs(visualModel, model) {
   } else {
     specs = tvCartesianSpecs(ctx);
   }
-  specs.forEach(s => { s.name = visualModel.metadata.worksheetName; s.rolesSource = roles.source; tvApplyWorkbookAxes(s, ctx); tvApplyReferenceLines(s, ctx);
-                       tvNoteApproximations(s, ctx); });
+  // reference lines last: a line Excel cannot draw adds its note to the conversion the approximations named
+  specs.forEach(s => { s.name = visualModel.metadata.worksheetName; s.rolesSource = roles.source; tvApplyWorkbookAxes(s, ctx); tvNoteApproximations(s, ctx);
+                       tvApplyReferenceLines(s, ctx); });
   return specs;
 }

@@ -125,7 +125,7 @@ export function refLineLabel(spec, rl, pos, valueFlag = "showVal", idx = 0) {
 export function refLineXY(spec, rl, k) {
   const lit = vals => `<c:numLit><c:formatCode>General</c:formatCode><c:ptCount val="${vals.length}"/>` +
     vals.map((v, i) => `<c:pt idx="${i}"><c:v>${v}</c:v></c:pt>`).join("") + `</c:numLit>`;
-  return `<c:ser><c:idx val="${k}"/><c:order val="${k}"/><c:tx><c:v>${esc((rl.labelFmt || "Reference line").replace(/"/g, ""))}</c:v></c:tx>` +
+  return `<c:ser><c:idx val="${k}"/><c:order val="${k}"/><c:tx><c:v>${esc(rl.name)}</c:v></c:tx>` +
     `<c:spPr>${refLineLn(rl)}</c:spPr><c:marker><c:symbol val="none"/></c:marker>${refLineLabel(spec, rl, "r", "showCatName")}` +
     `<c:xVal>${lit([rl.value, rl.value])}</c:xVal><c:yVal>${lit([0, 1])}</c:yVal><c:smooth val="0"/></c:ser>`;
 }
@@ -180,6 +180,7 @@ export function niceUnit(range, ticks) {
  * The primary value axis as Tableau draws it: ticks at the workbook's spacing, else a "nice" step about every
  * 55 px (110 px across); the range starts at zero (without "Include zero": at a tick below the data) and ends
  * just past the data, so no empty tick sits above the marks. Stacked bars / areas count as their totals.
+ * Synchronized axes always get an explicit range: the secondary axis is pinned to it.
  * @param {ChartSpec} spec @param {{ w: number, h: number } | null} axisPlot approximate plot area in px
  * @returns {{ fixed: { min?: number, max?: number }, unit: number | null }}
  */
@@ -219,7 +220,7 @@ export function valueRange(spec, axisPlot) {
   };
   // the workbook's spacing, unless it would crowd the axis with ticks (data far beyond what it was set for)
   const spacing = span => spec.valueMajorUnit && span / spec.valueMajorUnit <= 40 ? spec.valueMajorUnit : null;
-  if (!vals.length || pinned || !(ticks || spec.includeZero === false || (spec.refLines && spec.refLines.length))) {
+  if (!vals.length || pinned || !(ticks || spec.includeZero === false || spec.secondarySync || (spec.refLines && spec.refLines.length))) {
     const span = pinned ? fixed.max - fixed.min : 0;
     const unit = pinned ? spacing(span) || niceUnit(span, ticks || 5) : spec.valueMajorUnit || null;
     return { fixed, unit: settle(fixed, unit) };
@@ -349,8 +350,10 @@ export function axisFmt(fmt, values) {
 /**
  * @param {ChartSpec} spec @param {number} id @param {number} cross
  * @param {{ pos?: string, crosses?: string, grid?: boolean, fixed?: { min?: number, max?: number }, title?: string,
- *           numFmt?: string, values?: (number | null)[], deleted?: boolean, lowLabels?: boolean, midCat?: boolean,
- *           majorUnit?: number | null, tickFmt?: string, reversed?: boolean }} [o] tickFmt = the workbook's own tick format, used as is
+ *           numFmt?: string, values?: (number | null)[], deleted?: boolean, hidden?: boolean, lowLabels?: boolean, midCat?: boolean,
+ *           majorUnit?: number | null, tickFmt?: string, reversed?: boolean }} [o] tickFmt = the workbook's own tick format, used as is;
+ *   hidden = kept for its scale but not drawn (no labels, tick marks or line) – Excel draws the series of a deleted value
+ *   axis on the other axis group's value axis
  */
 export function valAxis(spec, id, cross, o = {}) {
   const horizontal = spec.barDir === "bar" && spec.kind !== "scatter";
@@ -365,7 +368,7 @@ export function valAxis(spec, id, cross, o = {}) {
   return `<c:valAx><c:axId val="${id}"/><c:scaling><c:orientation val="${o.reversed ? "maxMin" : "minMax"}"/>${scale}</c:scaling><c:delete val="${o.deleted ? 1 : 0}"/>` +
     `<c:axPos val="${pos}"/>${grid}${title(o.title, spec.font, pos === "l" || pos === "r")}` +
     `<c:numFmt formatCode="${esc(o.tickFmt || axisFmt(o.numFmt || "General", o.values))}" sourceLinked="0"/><c:majorTickMark val="none"/>` +
-    `<c:minorTickMark val="none"/><c:tickLblPos val="${o.lowLabels ? "low" : "nextTo"}"/><c:spPr><a:ln><a:noFill/></a:ln></c:spPr>` +
+    `<c:minorTickMark val="none"/><c:tickLblPos val="${o.hidden ? "none" : o.lowLabels ? "low" : "nextTo"}"/><c:spPr><a:ln><a:noFill/></a:ln></c:spPr>` +
     `${txPr(spec.font)}<c:crossAx val="${cross}"/><c:crosses val="${crosses}"/>` +
     `<c:crossBetween val="${o.midCat ? "midCat" : "between"}"/>${o.majorUnit ? `<c:majorUnit val="${o.majorUnit}"/>` : ""}</c:valAx>`;
 }
@@ -534,11 +537,13 @@ export function plotAreaXml(spec, refs, plot = null, axisPlot = null) {
     return `<c:lineChart><c:grouping val="standard"/><c:varyColors val="0"/>${sers}${box}<c:marker val="1"/>${ax}</c:lineChart>`;
   }).join("");
   const axisValues = secondary => spec.series.filter(s => !!s.secondary === secondary).flatMap(s => s.values);
-  // reference lines across horizontal bars: XY lines on hidden x2 / y2 axes, x2 pinned to the bars' value range
+  // reference lines across horizontal bars: XY lines on hidden x2 / y2 axes, x2 pinned to the bars' value range – never
+  // beside a secondary axis: Excel cannot open a workbook with a chart of three axis groups (the model leaves those out)
   let overlay = "", overlayAxes = "";
   const targets = spec.barDir === "bar" && spec.targets ? 1 : 0;
   const dots = spec.barDir === "bar" && spec.overlay ? spec.overlay : [];
-  if (spec.barDir === "bar" && ((spec.refLines && spec.refLines.length) || targets || dots.length) && fixed.min !== undefined && fixed.max !== undefined) {
+  if (spec.barDir === "bar" && !hasSecondary && ((spec.refLines && spec.refLines.length) || targets || dots.length) &&
+      fixed.min !== undefined && fixed.max !== undefined) {
     const k0 = spec.series.length + (spec.refLines || []).length + targets;
     overlay = `<c:scatterChart><c:scatterStyle val="lineMarker"/><c:varyColors val="0"/>` +
       (spec.refLines || []).map((rl, i) => refLineXY(spec, rl, spec.series.length + i)).join("") +
@@ -547,15 +552,17 @@ export function plotAreaXml(spec, refs, plot = null, axisPlot = null) {
       `<c:axId val="${AX.x2}"/><c:axId val="${AX.y2}"/></c:scatterChart>`;
     overlayAxes = hiddenValAx(AX.x2, AX.y2, "t", fixed.min, fixed.max) + hiddenValAx(AX.y2, AX.x2, "r", 0, 1);
   }
+  // a hidden value axis beside a second axis group is kept, not drawn: Excel would draw a deleted axis's series on the
+  // other group's axis, losing the scale Tableau gives each axis
   let axes = catAxis(spec, AX.cat, AX.val, { deleted: spec.categoryAxisHidden, rot: (spec.categoryRotation || 0) * 60000 }) +
     valAxis(spec, AX.val, AX.cat, { title: spec.valueAxisHidden ? null : spec.valueTitle, numFmt: spec.numFmt, values: axisValues(false),
-                                    fixed, deleted: spec.valueAxisHidden, majorUnit: unit, tickFmt: spec.valueAxisNumFmt,
-                                    reversed: spec.valueReversed });
+                                    fixed, deleted: spec.valueAxisHidden && !hasSecondary, hidden: spec.valueAxisHidden && hasSecondary,
+                                    majorUnit: unit, tickFmt: spec.valueAxisNumFmt, reversed: spec.valueReversed });
   if (hasSecondary) {
     axes += catAxis(spec, AX.cat2, AX.val2, { deleted: true }) +
       valAxis(spec, AX.val2, AX.cat2, { pos: spec.barDir === "bar" ? "t" : "r", crosses: "max", grid: false,
         title: spec.secondaryAxisHidden ? null : spec.secondaryTitle, numFmt: spec.secondaryNumFmt || spec.numFmt, values: axisValues(true),
-        deleted: spec.secondaryAxisHidden, tickFmt: spec.secondaryAxisNumFmt,
+        hidden: spec.secondaryAxisHidden, tickFmt: spec.secondaryAxisNumFmt,
         // synchronized: the same range as the primary axis, so both measures are drawn to one scale
         ...(spec.secondarySync ? { fixed, majorUnit: unit } : {}) });
   }

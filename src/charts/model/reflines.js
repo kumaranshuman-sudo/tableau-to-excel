@@ -1,5 +1,5 @@
 /* Analytics → Reference Line on a chart spec, valued, labelled and styled like Tableau. */
-import { tableauToExcelNumFmt } from "../../format/number-format.js";
+import { tableauToExcelNumFmt, tfFormatNumber } from "../../format/number-format.js";
 import { tfSameField } from "../../twb/field-ref.js";
 import { tvMeasureLabel } from "./common.js";
 
@@ -49,7 +49,8 @@ export function tvReferenceLabelFormat(rl, valueFmt) {
 /**
  * Adds the worksheet's reference lines (table / pane scope) on the value axis: a flat line series on a
  * vertical value axis, or spec.refLines for horizontal bars (the writer draws those across the bars).
- * Lines per cell are Tableau's per-mark ticks – not drawn.
+ * Lines per cell are Tableau's per-mark ticks – not drawn. Across horizontal bars on two axes a line is left
+ * out and named in the conversion report: the writer would need a third axis group, and Excel cannot open that.
  * @param {ChartSpec} spec @param {ChartContext} ctx
  */
 export function tvApplyReferenceLines(spec, ctx) {
@@ -77,6 +78,8 @@ export function tvApplyReferenceLines(spec, ctx) {
   const style = fmt.reflineStyle();
   const hidden = style.lineVisible === false || style.strokeSize === 0;
   const valueFmt = (style.numFmtRaw && tableauToExcelNumFmt(style.numFmtRaw)) || spec.numFmt || "General";
+  const twoAxes = spec.series.some(s => s.secondary);
+  let left = 0;
   lines.forEach(rl => {
     if (rl.axis && measures.length && !measures.some(m => tfSameField(m, rl.axis))) return;   // another measure's axis
     const data = seriesOf(rl);
@@ -85,13 +88,21 @@ export function tvApplyReferenceLines(spec, ctx) {
     const labelFmt = tvReferenceLabelFormat(rl, valueFmt);
     if (hidden && !labelFmt) return;
     /** @type {RefLineStyle} */
-    const line = { value, labelFmt, color: style.strokeColor ? style.strokeColor.slice(2) : "7F7F7F", alpha: style.strokeAlpha ?? 1,
+    const line = { value, labelFmt, name: labelFmt ? tfFormatNumber(value, labelFmt) : "Reference line",
+                   color: style.strokeColor ? style.strokeColor.slice(2) : "7F7F7F", alpha: style.strokeAlpha ?? 1,
                    width: style.strokeSize || 1, dash: style.dash === "dashed", hidden,
                    font: { color: style.color ? style.color.slice(2) : undefined, bold: style.bold } };
-    if (spec.barDir === "bar" && data.some(s => (s.type || spec.kind) === "bar")) (spec.refLines = spec.refLines || []).push(line);
+    if (spec.barDir === "bar" && data.some(s => (s.type || spec.kind) === "bar")) {
+      if (twoAxes) left++; else (spec.refLines = spec.refLines || []).push(line);
+    }
     // drawn on its measure's axis: on a dual-axis chart that may be the secondary one
-    else spec.series.push({ name: (labelFmt || "Reference line").replace(/"/g, ""), type: "line", color: line.color, line: !hidden,
+    else spec.series.push({ name: line.name, type: "line", color: line.color, line: !hidden,
                             ...(data.length && data.every(s => s.secondary) ? { secondary: true } : {}),
                             marker: false, labels: false, values: spec.categories.levels[0].map(() => value), refLine: line });
   });
+  if (left) {
+    const c = spec.conversion;
+    const note = `reference line${left > 1 ? "s" : ""} left out: Excel cannot draw ${left > 1 ? "them" : "one"} across horizontal bars on two axes`;
+    spec.conversion = { ...c, strategy: "APPROXIMATE", note: c && c.note ? `${c.note}; ${note}` : note };
+  }
 }

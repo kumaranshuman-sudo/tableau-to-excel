@@ -439,6 +439,8 @@ interface RefLineStyle {
   value: number;
   /** null = no label */
   labelFmt: string | null;
+  /** series name: the label as Excel prints it ("Avg. 46% Loss"), else "Reference line" */
+  name: string;
   color: string;
   alpha: number;
   width: number;
