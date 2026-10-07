@@ -2151,8 +2151,27 @@ function tvCategories(vm, catCis, sortNative) {
   return {
     count: order.length,
     levels: (catCis.length ? catCis : [null]).map((_, l) => order.map(o => catCis.length ? shown[l](o.labels[l], o.dvs[l]) : o.labels[l])),
+    dvs: order.map(o => o.dvs || []),
     indexOf: row => index.get(catCis.map(ci => tvText(row[ci])).join("\u0001"))
   };
+}
+
+/**
+ * A continuous date on the category axis is a time axis in Tableau (ticks at whole years, quarters, months …): the
+ * categories' dates as Excel serials and the step between marks, or null when a category is not a date.
+ * @param {{ dvs?: DataValue[][] }} cats @returns {{ serials: number[], base: "days" | "months" | "years" } | null}
+ */
+function tvDateAxis(cats) {
+  const dvs = (cats.dvs || []).map(d => d[0]);
+  const isDate = dv => { const v = dv && (dv.nativeValue !== undefined ? dv.nativeValue : dv.value); return v instanceof Date || typeof v === "string"; };
+  if (dvs.length < 2 || !dvs.every(isDate)) return null;
+  // Tableau's dates arrive at midnight, sometimes in local time: the nearest whole day
+  const serials = dvs.map(dv => { const s = tvExcelSerial(dv); return s === null ? null : Math.round(s); });
+  if (serials.some(s => s === null)) return null;
+  const gaps = serials.slice(1).map((s, i) => s - /** @type {number} */ (serials[i]));
+  if (gaps.some(g => g <= 0)) return null;
+  const step = Math.min(...gaps);
+  return { serials: /** @type {number[]} */ (serials), base: step >= 365 ? "years" : step >= 28 ? "months" : "days" };
 }
 
 /**
@@ -2607,6 +2626,8 @@ function tvCartesianSpecs(ctx) {
   if (cats.count > TV_MAX_POINTS) throw new Error(`${cats.count} categories – too many for an Excel chart`);
   const categoryTitle = fieldLabels && catDims.length ? catDims.map(d => tvMeasureLabel(vm, d.ci)).join(" / ") : "";
   const categories = { names: catDims.length ? catDims.map(d => tvMeasureLabel(vm, d.ci)) : [mnCategory ? "Measure Names" : ""], levels: cats.levels };
+  // one continuous date across the chart: an Excel date axis, labelled at whole years / months like Tableau's
+  const dateAxis = !horizontal && !mnCategory && catDims.length === 1 && catDims[0].continuous ? tvDateAxis(cats) : null;
 
   // per-category colours: colour = a category level, or a continuous measure
   let pointColors;
@@ -2694,7 +2715,7 @@ function tvCartesianSpecs(ctx) {
     // bottom → reversed (bars across keep the legend's order from the axis outwards)
     const ordered = paneBreaks(stacked && !horizontal ? [...series].reverse() : series);
     const spec = { ...tvBaseSpec(vm), kind, barDir: horizontal ? "bar" : "col", stacked,
-                   categories, categoryTitle, legend: series.length > 1, series: ordered, ...extra };
+                   categories, categoryTitle, legend: series.length > 1, series: ordered, ...(dateAxis ? { dateAxis } : {}), ...extra };
     if (percent) {
       spec.percent = true;
       if (!/%/.test(spec.numFmt || "")) spec.numFmt = "0%";
@@ -8544,8 +8565,12 @@ function writeChartData(ws, spec, startRow) {
   const starts = spec.kind === "treemap" ? levels.map(lv => lv.map(() => true)) : levelStarts(levels);
   spec.categories.names.forEach((name, l) => put(startRow, l, name || ""));
   spec.series.forEach((s, k) => put(startRow, L + k, s.name));
+  // a date axis reads real dates
+  const dates = spec.dateAxis ? spec.dateAxis.serials : null;
+  const dateFmt = spec.dateAxis && { years: "yyyy", months: "mmm yyyy", days: "d mmm yyyy" }[spec.dateAxis.base];
   for (let i = 0; i < N; i++) {
-    for (let l = 0; l < L; l++) if (l === L - 1 || starts[l][i]) put(startRow + 1 + i, l, levels[l][i]);
+    if (dates) put(startRow + 1 + i, 0, dates[i], dateFmt);
+    else for (let l = 0; l < L; l++) if (l === L - 1 || starts[l][i]) put(startRow + 1 + i, l, levels[l][i]);
     spec.series.forEach((s, k) => {
       const v = num(s.values[i]);
       if (v !== null) put(startRow + 1 + i, L + k, v, s.secondary ? spec.secondaryNumFmt : spec.numFmt);
@@ -8618,8 +8643,13 @@ function serTx(ref, name) {
 }
 
 /** @param {string} ref @param {any[][]} levels @param {string[] | null} [shown] labels shown instead (Tableau's
- * truncated headers): written into the chart, as Excel re-reads linked category cells when it opens the file */
-function catXml(ref, levels, shown = null) {
+ * truncated headers): written into the chart, as Excel re-reads linked category cells when it opens the file
+ * @param {{ serials: number[] } | null} [dates] a date axis: the dates as serials */
+function catXml(ref, levels, shown = null, dates = null) {
+  if (dates) {
+    return `<c:cat><c:numRef><c:f>${esc(ref)}</c:f><c:numCache><c:formatCode>yyyy\\-mm\\-dd</c:formatCode><c:ptCount val="${dates.serials.length}"/>` +
+      dates.serials.map((v, i) => `<c:pt idx="${i}"><c:v>${v}</c:v></c:pt>`).join("") + `</c:numCache></c:numRef></c:cat>`;
+  }
   if (shown && levels.length <= 1) return `<c:cat><c:strLit>${strCache(shown)}</c:strLit></c:cat>`;
   if (levels.length <= 1) {
     return `<c:cat><c:strRef><c:f>${esc(ref)}</c:f><c:strCache>${strCache(levels[0] || [])}</c:strCache></c:strRef></c:cat>`;
@@ -8834,12 +8864,12 @@ function seriesXml(spec, s, k, refs, type, hiddenLabels) {
       `<c:spPr>${solid(c, opacity)}<a:ln><a:noFill/></a:ln></c:spPr></c:dPt>` : "").join("");
     const pos = spec.labelPos || (spec.stacked ? null : "outEnd");
     return `<c:ser>${head}<c:spPr>${solid(s.color, opacity)}<a:ln><a:noFill/></a:ln></c:spPr><c:invertIfNegative val="0"/>` +
-      `${dpts}${dLbls(spec, s, pos)}${catXml(refs.cat, levels, spec.categoryShown)}${valXml("val", r.val, s.values)}${labelRangeXml(s, r)}</c:ser>`;
+      `${dpts}${dLbls(spec, s, pos)}${catXml(refs.cat, levels, spec.categoryShown, spec.dateAxis)}${valXml("val", r.val, s.values)}${labelRangeXml(s, r)}</c:ser>`;
   }
   if (type === "line" && s.refLine) {         // reference line: flat, no markers; label above the 2nd point, as Tableau's
     const at = Math.min(1, Math.max(0, (s.values || []).length - 1));
     return `<c:ser>${head}<c:spPr>${refLineLn(s.refLine)}</c:spPr><c:marker><c:symbol val="none"/></c:marker>` +
-      `${refLineLabel(spec, s.refLine, "t", "showVal", at)}${catXml(refs.cat, levels, spec.categoryShown)}${valXml("val", r.val, s.values)}<c:smooth val="0"/></c:ser>`;
+      `${refLineLabel(spec, s.refLine, "t", "showVal", at)}${catXml(refs.cat, levels, spec.categoryShown, spec.dateAxis)}${valXml("val", r.val, s.values)}<c:smooth val="0"/></c:ser>`;
   }
   if (type === "line") {
     const lineSp = s.line === false ? `<a:ln w="28575"><a:noFill/></a:ln>`
@@ -8848,17 +8878,17 @@ function seriesXml(spec, s, k, refs, type, hiddenLabels) {
     const size = s.markerSize || 7;
     const dpts = s.marker ? pc.map((c, i) => c ? `<c:dPt><c:idx val="${i}"/>${markerXml(symbol, c, size)}<c:bubble3D val="0"/></c:dPt>` : "").join("") : "";
     return `<c:ser>${head}<c:spPr>${lineSp}</c:spPr>${markerXml(symbol, s.color, size)}${dpts}` +
-      `${dLbls(spec, s, "t", hiddenLabels)}${catXml(refs.cat, levels, spec.categoryShown)}${valXml("val", r.val, s.values)}<c:smooth val="0"/>${labelRangeXml(s, r)}</c:ser>`;
+      `${dLbls(spec, s, "t", hiddenLabels)}${catXml(refs.cat, levels, spec.categoryShown, spec.dateAxis)}${valXml("val", r.val, s.values)}<c:smooth val="0"/>${labelRangeXml(s, r)}</c:ser>`;
   }
   if (type === "area") {
     return `<c:ser>${head}<c:spPr>${solid(s.color, opacity !== null || s.alpha !== undefined ? opacity : spec.stacked ? null : 75000)}<a:ln><a:noFill/></a:ln></c:spPr>` +
-      `${dLbls(spec, s, null)}${catXml(refs.cat, levels, spec.categoryShown)}${valXml("val", r.val, s.values)}</c:ser>`;
+      `${dLbls(spec, s, null)}${catXml(refs.cat, levels, spec.categoryShown, spec.dateAxis)}${valXml("val", r.val, s.values)}</c:ser>`;
   }
   if (type === "pie") {
     const dpts = pc.map((c, i) => `<c:dPt><c:idx val="${i}"/><c:bubble3D val="0"/>` +
       `<c:spPr>${solid(c || s.color)}${line("FFFFFF", 12700)}</c:spPr></c:dPt>`).join("");
     return `<c:ser>${head}${dpts}${dLbls(spec, s, spec.kind === "pie" ? "bestFit" : null)}` +
-      `${catXml(refs.cat, levels, spec.categoryShown)}${valXml("val", r.val, s.values)}${labelRangeXml(s, r)}</c:ser>`;
+      `${catXml(refs.cat, levels, spec.categoryShown, spec.dateAxis)}${valXml("val", r.val, s.values)}${labelRangeXml(s, r)}</c:ser>`;
   }
   if (type === "bubble") {
     // packed bubbles: opaque with a white outline like Tableau; map marks slightly see-through
@@ -8883,6 +8913,7 @@ function seriesXml(spec, s, k, refs, type, hiddenLabels) {
 
 /** @param {ChartSpec} spec @param {number} id @param {number} cross @param {{ deleted?: boolean, rot?: number }} [o] rot: label rotation (60000ths of a degree) */
 function catAxis(spec, id, cross, o = {}) {
+  if (spec.dateAxis) return dateAxisXml(spec, id, cross, o);
   const horizontal = spec.barDir === "bar";
   const multi = spec.categories && spec.categories.levels.length > 1;
   return `<c:catAx><c:axId val="${id}"/><c:scaling><c:orientation val="${horizontal ? "maxMin" : "minMax"}"/></c:scaling>` +
@@ -8892,6 +8923,45 @@ function catAxis(spec, id, cross, o = {}) {
     `<c:tickLblPos val="${o.deleted ? "none" : spec.valueReversed ? "nextTo" : "low"}"/><c:spPr>${spec.axisLine === false ? "<a:ln><a:noFill/></a:ln>" : line("D4D4D4", 9525)}</c:spPr>${txPr(spec.font, { rot: o.rot })}` +
     `<c:crossAx val="${cross}"/><c:crosses val="${spec.valueReversed && !o.deleted ? "max" : "autoZero"}"/><c:auto val="1"/><c:lblAlgn val="ctr"/>` +
     `<c:lblOffset val="100"/>${o.rot !== undefined ? '<c:tickLblSkip val="1"/>' : ""}<c:noMultiLvlLbl val="${multi ? 0 : 1}"/></c:catAx>`;
+}
+
+/** a continuous date axis: Excel's date axis, its labels as far apart as dateTicks found room for
+ * @param {ChartSpec} spec @param {number} id @param {number} cross @param {{ deleted?: boolean, rot?: number }} o */
+function dateAxisXml(spec, id, cross, o) {
+  const t = spec.dateTicks || { majorUnit: 1, majorTimeUnit: "years", numFmt: "yyyy" };
+  return `<c:dateAx><c:axId val="${id}"/><c:scaling><c:orientation val="minMax"/></c:scaling>` +
+    `<c:delete val="${o.deleted ? 1 : 0}"/><c:axPos val="b"/>${o.deleted ? "" : title(spec.categoryTitle, spec.font, false)}` +
+    `<c:numFmt formatCode="${esc(t.numFmt)}" sourceLinked="0"/><c:majorTickMark val="none"/><c:minorTickMark val="none"/>` +
+    `<c:tickLblPos val="${o.deleted ? "none" : spec.valueReversed ? "nextTo" : "low"}"/><c:spPr>${spec.axisLine === false ? "<a:ln><a:noFill/></a:ln>" : line("D4D4D4", 9525)}</c:spPr>${txPr(spec.font, { rot: o.rot })}` +
+    `<c:crossAx val="${cross}"/><c:crosses val="${spec.valueReversed && !o.deleted ? "max" : "autoZero"}"/><c:auto val="0"/><c:lblOffset val="100"/>` +
+    `<c:baseTimeUnit val="${spec.dateAxis.base}"/><c:majorUnit val="${t.majorUnit}"/><c:majorTimeUnit val="${t.majorTimeUnit}"/></c:dateAx>`;
+}
+
+/**
+ * Tableau labels a time axis at whole units – years, else quarters, months or days – as close together as the labels
+ * fit: the first step whose labels fit the plot width.
+ * @param {ChartSpec} spec @param {{ w: number, h: number } | null} axisPlot
+ * @returns {{ majorUnit: number, majorTimeUnit: "days" | "months" | "years", numFmt: string } | null}
+ */
+function dateTicks(spec, axisPlot) {
+  const d = spec.dateAxis;
+  if (!d) return null;
+  const s = d.serials, first = s[0], last = s[s.length - 1];
+  const month = v => { const t = new Date((v - 25569) * 86400000); return t.getUTCFullYear() * 12 + t.getUTCMonth(); };
+  const months = month(last) - month(first), days = last - first;
+  const charPx = ((spec.font && spec.font.size) || 9) * 4 / 3 * 0.55;          // average character of the label font
+  const width = axisPlot ? axisPlot.w : 400;
+  /** @type {[number, "days" | "months" | "years", string][]} */
+  const steps = [
+    ...(d.base === "days" ? /** @type {[number, "days", string][]} */ ([[1, "days", "d mmm"], [7, "days", "d mmm"], [14, "days", "d mmm"]]) : []),
+    ...(d.base !== "years" ? /** @type {[number, "months", string][]} */ ([[1, "months", "mmm yyyy"], [3, "months", "mmm yyyy"], [6, "months", "mmm yyyy"]]) : []),
+    [1, "years", "yyyy"], [2, "years", "yyyy"], [5, "years", "yyyy"], [10, "years", "yyyy"], [25, "years", "yyyy"]
+  ];
+  for (const [unit, of, fmt] of steps) {
+    const count = Math.floor((of === "days" ? days : of === "months" ? months : months / 12) / unit) + 1;
+    if (count * (fmt.length * charPx + 12) <= width) return { majorUnit: unit, majorTimeUnit: of, numFmt: fmt };
+  }
+  return { majorUnit: 50, majorTimeUnit: "years", numFmt: "yyyy" };
 }
 
 /* Tableau axes "include zero" by default; Excel would otherwise auto-scale from a non-zero minimum */
@@ -9014,7 +9084,8 @@ function truncatedCategories(spec, axisPlot) {
 /** @param {ChartSpec} spec @param {ChartRefs} refs @param {{ w: number, h: number } | null} [plot] plot area in px (manual layout)
  *  @param {{ w: number, h: number } | null} [axisPlot] approximate plot area of a chart with axes, for Tableau-like tick spacing */
 function plotAreaXml(spec, refs, plot = null, axisPlot = null) {
-  spec.categoryShown = truncatedCategories(spec, axisPlot);
+  spec.categoryShown = spec.dateAxis ? null : truncatedCategories(spec, axisPlot);
+  spec.dateTicks = dateTicks(spec, axisPlot);
   const k = spec.kind;
   if (k === "pie" || k === "doughnut") {
     const ser = seriesXml(spec, spec.series[0], 0, refs, "pie");
