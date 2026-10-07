@@ -423,6 +423,36 @@ function applyLabels(spec, fmt, measures) {
 }
 
 /**
+ * Label → Marks to Label: Tableau labels only some marks of each line / pane – Min/Max of a field (the earliest and
+ * latest dates when the field is the category axis, else the lowest and highest values), Line Ends or Most Recent:
+ * the points that keep their label (s.labelOnly).
+ * @param {ChartSpec} spec @param {SheetFormatter} fmt @param {{ ref?: FieldRef | null } | undefined} catDim the innermost category field
+ */
+function applyLabelMarks(spec, fmt, catDim) {
+  const m = fmt.markLabelsMarks();
+  if (!m || !/^(range|line-ends|most-recent)$/.test(m.mode || "")) return;
+  const onCategory = !m.field || !!(catDim && catDim.ref && tfSameField(tfParseFieldRef(m.field), catDim.ref));
+  spec.series.forEach(s => {
+    if (!s.labels || s.refLine || !s.values) return;
+    const at = s.values.map((v, i) => num(v) === null ? -1 : i).filter(i => i >= 0);
+    if (!at.length) return;
+    const first = at[0], last = at[at.length - 1], keep = new Set();
+    if (m.mode === "range" && !onCategory) {
+      const byValue = [...at].sort((a, b) => /** @type {number} */ (s.values[a]) - /** @type {number} */ (s.values[b]));
+      if (m.min) keep.add(byValue[0]);
+      if (m.max) keep.add(byValue[byValue.length - 1]);
+    } else if (m.mode === "range") {
+      if (m.min) keep.add(first);
+      if (m.max) keep.add(last);
+    } else if (m.mode === "line-ends") {
+      if (m.first) keep.add(first);
+      if (m.last) keep.add(last);
+    } else keep.add(last);
+    s.labelOnly = [...keep];
+  });
+}
+
+/**
  * Tableau hides axes ("Show Header" off), renames or removes axis titles (Edit Axis), and turns grid
  * lines and axis rulers off per worksheet; the Excel chart follows the same settings.
  * @param {ChartSpec} spec @param {ChartContext} ctx
@@ -477,6 +507,7 @@ function tvApplyWorkbookAxes(spec, ctx) {
   spec.valueAxisNumFmt = axisNumFmt(fmt, refs[0]);
   if (refs[1]) spec.secondaryAxisNumFmt = axisNumFmt(fmt, refs[1]);
   applyLabels(spec, fmt, refs);
+  applyLabelMarks(spec, fmt, roles[catShelf].dims.slice(-1)[0]);
   // categories: a continuous pill draws an axis, discrete pills draw headers – hidden only if all are
   const dims = [...roles[valueShelf].dims.map(d => ({ d, shelf: valueShelf })), ...roles[catShelf].dims.map(d => ({ d, shelf: catShelf }))];
   const hidden = ({ d, shelf }) => !!d.ref && (d.continuous ? fmt.axisInfo(d.ref, shelf, "0").hidden === true : fmt.isLabelHidden(d.ref));
@@ -1340,6 +1371,15 @@ function createSheetFormatter(model, sheetName, onlyPanes) {
     },
     /** Label → "Allow labels to overlap other marks" off (Tableau's default) → overlapping labels hidden */
     markLabelsCulled() { return panes.some(p => markRule(p, "mark-labels-cull") !== "false"); },
+    /** Label → Marks to Label: "range" (Min/Max of a field), "line-ends", "most-recent" …; null = all marks */
+    markLabelsMarks() {
+      const p = panes.find(x => markRule(x, "mark-labels-mode") !== undefined);
+      if (!p) return null;
+      const r = a => markRule(p, a);
+      return { mode: r("mark-labels-mode"), field: r("mark-labels-range-field"),
+               min: r("mark-labels-range-min") !== "false", max: r("mark-labels-range-max") !== "false",
+               first: r("mark-labels-line-first") !== "false", last: r("mark-labels-line-last") !== "false" };
+    },
     /** Label → "Show mark labels"; unset = on when something is on Label */
     markLabelsShown() {
       return panes.some(p => {
@@ -2602,7 +2642,8 @@ function tvCartesianSpecs(ctx) {
   const color = roles.color;
   const colorCi = color && !color.measureNames && !color.continuous ? color.ci : -1;
   const colorLevel = colorCi >= 0 ? catDims.findIndex(d => d.ci === colorCi) : -1;
-  const scale = tvColorScale(vm, roles, ctx.markToken);
+  // a pane of small multiples gets the whole view's colours (its own rows hold one member of each)
+  const scale = ctx.colorScale !== undefined ? ctx.colorScale : tvColorScale(vm, roles, ctx.markToken);
   const fieldLabels = vm.fmt.hasModel ? vm.fmt.fieldLabelsShown(catShelf) : true;
   // rounded bars are lines in Tableau (thick, round caps): Excel's bars
   const asBars = t => ctx.roundedBar && t === "line" ? "bar" : t;
@@ -3125,6 +3166,100 @@ function tvHistogramSpecs(ctx) {
   return tvCartesianSpecs(ctx).map(s => ({ ...s, gapWidth: 0,
     conversion: { strategy: "CONSTRUCTED", output: `Column chart of Tableau's bins (no gaps)`,
                   note: "Tableau's own bins and counts as touching columns – the same bins Tableau draws, not Excel's automatic ones" } }));
+}
+
+/* ── small multiples: discrete dimensions beside the axes split Tableau's view into a grid of panes, each a little
+ *    chart of its own. Excel draws no panes inside a chart: one chart per pane, laid out as Tableau's grid ──────── */
+const TV_MAX_PANES = 48;
+
+/** a chart's values as its value axis has to reach them (stacked marks add up) @param {ChartSpec} spec @returns {number[]} */
+function tvAxisExtent(spec) {
+  const out = [], stacks = new Map();
+  spec.series.forEach(s => (s.values || []).forEach((v, i) => {
+    const x = num(v);
+    if (x === null) return;
+    if (!spec.stacked) { out.push(x); return; }
+    const t = stacks.get(i) || { pos: 0, neg: 0 };
+    if (x >= 0) t.pos += x; else t.neg += x;
+    stacks.set(i, t);
+  }));
+  stacks.forEach(t => out.push(t.pos, t.neg));
+  return out;
+}
+
+/** where Tableau ends an axis reaching v: the next tick of a round step (1, 2, 2.5, 5 × 10ⁿ) giving about four ticks */
+function tvNiceEnd(v) {
+  if (!v) return 0;
+  const a = Math.abs(v), raw = a / 4, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = ([1, 2, 2.5, 5, 10].find(k => k * mag >= raw - 1e-12) || 10) * mag;
+  return Math.sign(v) * +(Math.ceil(a / step - 1e-9) * step).toPrecision(12);
+}
+
+/**
+ * Tableau's grid of panes – rows: the discrete dimensions on Rows beside the measure, columns: the discrete dimensions
+ * on Columns outside the innermost field – as one chart spec per pane, its place and header texts on spec.grid. Every
+ * pane spans the same dates and the same value range (Tableau's uniform axis), unless the axis is independent.
+ * Null when the view is no such grid (the panes then stay one chart).
+ * @param {ChartContext} ctx @returns {ChartSpec[] | null}
+ */
+function tvSmallMultipleSpecs(ctx) {
+  const { vm, roles } = ctx;
+  if (!roles.rows.values.length || roles.cols.values.length) return null;          // panes of columns: measures on Rows
+  const rowDims = roles.rows.dims, colDims = roles.cols.dims, outer = colDims.slice(0, -1);
+  if (!rowDims.length || !colDims.length || [...rowDims, ...outer].some(d => d.continuous || d.ci < 0)) return null;
+  const keyOf = (r, dims) => dims.map(d => tvText(r[d.ci])).join("\u0001");
+  /** the members of the dimensions in Tableau's order (natural sort), with their header text */
+  const members = dims => {
+    const seen = new Map();
+    vm.rows.forEach(r => { const k = keyOf(r, dims); if (!seen.has(k)) seen.set(k, dims.map(d => r[d.ci])); });
+    return [...seen.entries()].sort(([, a], [, b]) => {
+      for (let l = 0; l < dims.length; l++) { const d = tfNaturalCompare(a[l], b[l]); if (d) return d; }
+      return 0;
+    }).map(([key, dvs]) => ({ key, label: dvs.map(dv => tfDvText(dv)).join(" / ") }));
+  };
+  const rowM = members(rowDims), colM = outer.length ? members(outer) : [{ key: "", label: "" }];
+  const n = rowM.length * colM.length;
+  if (n < 2 || n > TV_MAX_PANES) return null;
+  const paneRoles = { ...roles, rows: { ...roles.rows, dims: [] }, cols: { ...roles.cols, dims: colDims.slice(-1) } };
+  const rowRot = vm.fmt.hasModel ? vm.fmt.headerOrientation(rowDims[rowDims.length - 1].ref) : null;
+  const rowHead = { rowVertical: rowRot === -90 || rowRot === 90, rowLen: Math.max(...rowM.map(m => m.label.length)) };
+  const colorScale = tvColorScale(vm, roles, ctx.markToken);
+  /** @type {ChartSpec[]} */
+  const specs = [];
+  for (let r = 0; r < rowM.length; r++) {
+    for (let c = 0; c < colM.length; c++) {
+      const rows = vm.rows.filter(x => keyOf(x, rowDims) === rowM[r].key && (!outer.length || keyOf(x, outer) === colM[c].key));
+      if (!rows.length) continue;                                      // Tableau leaves an empty pane blank
+      const pane = tvCartesianSpecs({ ...ctx, vm: { ...vm, rows }, roles: paneRoles, colorScale });
+      if (pane.length !== 1) return null;                              // panes of panes: kept as one chart
+      specs.push({ ...pane[0], legend: false,
+                   grid: { row: r, col: c, rows: rowM.length, cols: colM.length, rowLabel: rowM[r].label, colLabel: colM[c].label, ...rowHead } });
+    }
+  }
+  if (specs.length < 2) return null;
+  // one time axis for all: the earliest and latest date of any pane; other categories have to be the same in each
+  const dated = specs.filter(s => s.dateAxis);
+  if (dated.length === specs.length) {
+    const min = Math.min(...dated.map(s => s.dateAxis.serials[0])), max = Math.max(...dated.map(s => s.dateAxis.serials[s.dateAxis.serials.length - 1]));
+    specs.forEach(s => { s.dateAxis = { ...s.dateAxis, min, max }; });
+  } else if (dated.length || specs.some(s => JSON.stringify(s.categories.levels) !== JSON.stringify(specs[0].categories.levels))) {
+    return null;
+  }
+  // Tableau's uniform axis: every pane on the whole view's range (an independent axis gives each pane its own)
+  const ref = roles.rows.values[0].ref;
+  const independent = ref && /independent/.test(vm.fmt.axisSpace(ref, "rows", "0").rangeType || "");
+  if (!independent && !specs.some(s => s.percent)) {
+    const all = specs.flatMap(tvAxisExtent);
+    const lo = Math.min(0, ...all), hi = Math.max(0, ...all);
+    specs.forEach(s => {
+      if (s.valueMin === undefined) s.valueMin = tvNiceEnd(lo);
+      if (s.valueMax === undefined) s.valueMax = tvNiceEnd(hi);
+    });
+  }
+  const conversion = { strategy: "CONSTRUCTED", output: `Small multiples: ${specs.length} charts in Tableau's ${rowM.length} × ${colM.length} grid`,
+                       note: "Excel draws no panes inside one chart: each pane is its own chart, on the same axes" };
+  specs.forEach(s => { s.conversion = s.conversion ? { ...s.conversion, note: `${s.conversion.note}; ${conversion.note}` } : conversion; });
+  return specs;
 }
 
 
@@ -4573,7 +4708,7 @@ function buildExcelChartSpecs(visualModel, model) {
              ![...roles.rows.values, ...roles.cols.values].some(v => v.mv)) {
     specs = tvScatterSpec(ctx, { lines: true });         // a line of one measure against another (a Pareto curve)
   } else {
-    specs = tvCartesianSpecs(ctx);
+    specs = tvSmallMultipleSpecs(ctx) || tvCartesianSpecs(ctx);
   }
   // reference lines last: a line Excel cannot draw adds its note to the conversion the approximations named
   specs.forEach(s => { s.name = visualModel.metadata.worksheetName; s.rolesSource = roles.source; tvApplyWorkbookAxes(s, ctx); tvNoteApproximations(s, ctx);
@@ -8620,10 +8755,12 @@ function txPr(font, o = {}) {
     `<a:p><a:pPr>${def}</a:pPr><a:endParaRPr lang="en-US"/></a:p></c:txPr>`;
 }
 
-function title(text, font, vertical) {
+/** @param {string} text @param {any} font @param {boolean} vertical reads upwards @param {boolean} [flat] level even where
+ * Excel would turn it (a value axis title) */
+function title(text, font, vertical, flat = false) {
   if (!text) return "";
   const def = runProps(font, {}, "defRPr").replace(' lang="en-US"', "");
-  return `<c:title><c:tx><c:rich><a:bodyPr${vertical ? ' rot="-5400000" vert="horz"' : ""}/><a:lstStyle/>` +
+  return `<c:title><c:tx><c:rich><a:bodyPr${vertical ? ' rot="-5400000" vert="horz"' : flat ? ' rot="0" vert="horz"' : ""}/><a:lstStyle/>` +
     `<a:p><a:pPr>${def}</a:pPr><a:r>${runProps(font, {}, "rPr")}<a:t>${esc(text)}</a:t></a:r></a:p></c:rich></c:tx>` +
     `<c:overlay val="0"/></c:title>`;
 }
@@ -8642,15 +8779,12 @@ function serTx(ref, name) {
   return `<c:tx><c:strRef><c:f>${esc(ref)}</c:f><c:strCache>${strCache([name])}</c:strCache></c:strRef></c:tx>`;
 }
 
-/** @param {string} ref @param {any[][]} levels @param {string[] | null} [shown] labels shown instead (Tableau's
- * truncated headers): written into the chart, as Excel re-reads linked category cells when it opens the file
- * @param {{ serials: number[] } | null} [dates] a date axis: the dates as serials */
-function catXml(ref, levels, shown = null, dates = null) {
+/** @param {string} ref @param {any[][]} levels @param {{ serials: number[] } | null} [dates] a date axis: the dates as serials */
+function catXml(ref, levels, dates = null) {
   if (dates) {
     return `<c:cat><c:numRef><c:f>${esc(ref)}</c:f><c:numCache><c:formatCode>yyyy\\-mm\\-dd</c:formatCode><c:ptCount val="${dates.serials.length}"/>` +
       dates.serials.map((v, i) => `<c:pt idx="${i}"><c:v>${v}</c:v></c:pt>`).join("") + `</c:numCache></c:numRef></c:cat>`;
   }
-  if (shown && levels.length <= 1) return `<c:cat><c:strLit>${strCache(shown)}</c:strLit></c:cat>`;
   if (levels.length <= 1) {
     return `<c:cat><c:strRef><c:f>${esc(ref)}</c:f><c:strCache>${strCache(levels[0] || [])}</c:strCache></c:strRef></c:cat>`;
   }
@@ -8671,7 +8805,7 @@ function valXml(tag, ref, values) {
  * @param {ChartSpec} spec */
 function labelTxPr(spec) {
   const lf = spec.labelFont;
-  if (!lf) return txPr(spec.font, spec.labelPos ? { noWrap: true } : {});
+  if (!lf) return txPr(spec.font, spec.labelPos || spec.series.some(s => s.labelOnly) ? { noWrap: true } : {});
   return txPr({ name: lf.name || spec.font.name, size: lf.size || spec.font.size, color: lf.color || spec.font.color },
               { bold: lf.bold, noWrap: true });
 }
@@ -8679,6 +8813,8 @@ function labelTxPr(spec) {
 /** @param {ChartSpec} spec @param {ChartSeries} s @param {string | null} pos @param {number[]} [hidden] points without a label */
 function dLbls(spec, s, pos, hidden) {
   if (!s.labels) return "";
+  const only = s.labelOnly ? new Set(s.labelOnly) : null;
+  if (only) hidden = [...new Set([...(hidden || []), ...(s.values || []).map((_, i) => i).filter(i => !only.has(i))])].sort((a, b) => a - b);
   const drop = (hidden || []).map(i => `<c:dLbl><c:idx val="${i}"/><c:delete val="1"/></c:dLbl>`).join("");
   if (s.labelTexts) {
     // a doughnut takes no label position (Excel refuses the file)
@@ -8691,7 +8827,21 @@ function dLbls(spec, s, pos, hidden) {
   const fmt = s.labelNumFmt || (s.secondary ? spec.secondaryNumFmt : spec.numFmt);
   const showVal = s.labelParts ? (s.labelParts.value ? 1 : 0) : 1;
   const showCat = s.labelParts && s.labelParts.category ? 1 : 0;
-  return `<c:dLbls>${fmt ? `<c:numFmt formatCode="${esc(fmt)}" sourceLinked="0"/>` : ""}` +
+  const shows = `<c:showLegendKey val="0"/><c:showVal val="${showVal}"/><c:showCatName val="${showCat}"/><c:showSerName val="0"/>` +
+    `<c:showPercent val="${s.labelParts && s.labelParts.percent ? 1 : 0}"/><c:showBubbleSize val="0"/>`;
+  // a label Tableau keeps on a line's first / last mark stays inside the pane: beside the point, not centred over it
+  const marks = (s.values || []).map((v, i) => num(v) === null ? -1 : i).filter(i => i >= 0);
+  const side = i => only && pos === "t" && marks.length > 1 ? (i === marks[0] ? "r" : i === marks[marks.length - 1] ? "l" : null) : null;
+  const placed = only ? [...only].filter(i => side(i)) : [];
+  if (placed.length) {
+    const one = i => `<c:dLbl><c:idx val="${i}"/>${fmt ? `<c:numFmt formatCode="${esc(fmt)}" sourceLinked="0"/>` : ""}` +
+      `<c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr>${labelTxPr(spec)}<c:dLblPos val="${side(i)}"/>${shows}</c:dLbl>`;
+    const del = i => `<c:dLbl><c:idx val="${i}"/><c:delete val="1"/></c:dLbl>`;
+    const items = [...(hidden || []).map(i => [i, del(i)]), ...placed.map(i => [i, one(i)])].sort((a, b) => +a[0] - +b[0]);
+    return `<c:dLbls>${items.map(x => x[1]).join("")}${fmt ? `<c:numFmt formatCode="${esc(fmt)}" sourceLinked="0"/>` : ""}` +
+      `<c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr>${labelTxPr(spec)}<c:dLblPos val="${pos}"/>${shows}</c:dLbls>`;
+  }
+  return `<c:dLbls>${drop}${fmt ? `<c:numFmt formatCode="${esc(fmt)}" sourceLinked="0"/>` : ""}` +
     `<c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr>${labelTxPr(spec)}` +
     `${pos ? `<c:dLblPos val="${pos}"/>` : ""}<c:showLegendKey val="0"/><c:showVal val="${showVal}"/>` +
     `<c:showCatName val="${showCat}"/><c:showSerName val="0"/><c:showPercent val="${s.labelParts && s.labelParts.percent ? 1 : 0}"/><c:showBubbleSize val="0"/>` +
@@ -8864,12 +9014,12 @@ function seriesXml(spec, s, k, refs, type, hiddenLabels) {
       `<c:spPr>${solid(c, opacity)}<a:ln><a:noFill/></a:ln></c:spPr></c:dPt>` : "").join("");
     const pos = spec.labelPos || (spec.stacked ? null : "outEnd");
     return `<c:ser>${head}<c:spPr>${solid(s.color, opacity)}<a:ln><a:noFill/></a:ln></c:spPr><c:invertIfNegative val="0"/>` +
-      `${dpts}${dLbls(spec, s, pos)}${catXml(refs.cat, levels, spec.categoryShown, spec.dateAxis)}${valXml("val", r.val, s.values)}${labelRangeXml(s, r)}</c:ser>`;
+      `${dpts}${dLbls(spec, s, pos)}${catXml(refs.cat, levels, spec.dateAxis)}${valXml("val", r.val, s.values)}${labelRangeXml(s, r)}</c:ser>`;
   }
   if (type === "line" && s.refLine) {         // reference line: flat, no markers; label above the 2nd point, as Tableau's
     const at = Math.min(1, Math.max(0, (s.values || []).length - 1));
     return `<c:ser>${head}<c:spPr>${refLineLn(s.refLine)}</c:spPr><c:marker><c:symbol val="none"/></c:marker>` +
-      `${refLineLabel(spec, s.refLine, "t", "showVal", at)}${catXml(refs.cat, levels, spec.categoryShown, spec.dateAxis)}${valXml("val", r.val, s.values)}<c:smooth val="0"/></c:ser>`;
+      `${refLineLabel(spec, s.refLine, "t", "showVal", at)}${catXml(refs.cat, levels, spec.dateAxis)}${valXml("val", r.val, s.values)}<c:smooth val="0"/></c:ser>`;
   }
   if (type === "line") {
     const lineSp = s.line === false ? `<a:ln w="28575"><a:noFill/></a:ln>`
@@ -8878,17 +9028,17 @@ function seriesXml(spec, s, k, refs, type, hiddenLabels) {
     const size = s.markerSize || 7;
     const dpts = s.marker ? pc.map((c, i) => c ? `<c:dPt><c:idx val="${i}"/>${markerXml(symbol, c, size)}<c:bubble3D val="0"/></c:dPt>` : "").join("") : "";
     return `<c:ser>${head}<c:spPr>${lineSp}</c:spPr>${markerXml(symbol, s.color, size)}${dpts}` +
-      `${dLbls(spec, s, "t", hiddenLabels)}${catXml(refs.cat, levels, spec.categoryShown, spec.dateAxis)}${valXml("val", r.val, s.values)}<c:smooth val="0"/>${labelRangeXml(s, r)}</c:ser>`;
+      `${dLbls(spec, s, "t", hiddenLabels)}${catXml(refs.cat, levels, spec.dateAxis)}${valXml("val", r.val, s.values)}<c:smooth val="0"/>${labelRangeXml(s, r)}</c:ser>`;
   }
   if (type === "area") {
     return `<c:ser>${head}<c:spPr>${solid(s.color, opacity !== null || s.alpha !== undefined ? opacity : spec.stacked ? null : 75000)}<a:ln><a:noFill/></a:ln></c:spPr>` +
-      `${dLbls(spec, s, null)}${catXml(refs.cat, levels, spec.categoryShown, spec.dateAxis)}${valXml("val", r.val, s.values)}</c:ser>`;
+      `${dLbls(spec, s, null)}${catXml(refs.cat, levels, spec.dateAxis)}${valXml("val", r.val, s.values)}</c:ser>`;
   }
   if (type === "pie") {
     const dpts = pc.map((c, i) => `<c:dPt><c:idx val="${i}"/><c:bubble3D val="0"/>` +
       `<c:spPr>${solid(c || s.color)}${line("FFFFFF", 12700)}</c:spPr></c:dPt>`).join("");
     return `<c:ser>${head}${dpts}${dLbls(spec, s, spec.kind === "pie" ? "bestFit" : null)}` +
-      `${catXml(refs.cat, levels, spec.categoryShown, spec.dateAxis)}${valXml("val", r.val, s.values)}${labelRangeXml(s, r)}</c:ser>`;
+      `${catXml(refs.cat, levels, spec.dateAxis)}${valXml("val", r.val, s.values)}${labelRangeXml(s, r)}</c:ser>`;
   }
   if (type === "bubble") {
     // packed bubbles: opaque with a white outline like Tableau; map marks slightly see-through
@@ -8911,7 +9061,8 @@ function seriesXml(spec, s, k, refs, type, hiddenLabels) {
     labelRangeXml(s, r) + `</c:ser>`;
 }
 
-/** @param {ChartSpec} spec @param {number} id @param {number} cross @param {{ deleted?: boolean, rot?: number }} [o] rot: label rotation (60000ths of a degree) */
+/** @param {ChartSpec} spec @param {number} id @param {number} cross @param {{ deleted?: boolean, rot?: number, skip?: number }} [o]
+ *  rot: label rotation (60000ths of a degree), skip: every n-th label shown */
 function catAxis(spec, id, cross, o = {}) {
   if (spec.dateAxis) return dateAxisXml(spec, id, cross, o);
   const horizontal = spec.barDir === "bar";
@@ -8922,14 +9073,16 @@ function catAxis(spec, id, cross, o = {}) {
     `<c:numFmt formatCode="General" sourceLinked="1"/><c:majorTickMark val="none"/><c:minorTickMark val="none"/>` +
     `<c:tickLblPos val="${o.deleted ? "none" : spec.valueReversed ? "nextTo" : "low"}"/><c:spPr>${spec.axisLine === false ? "<a:ln><a:noFill/></a:ln>" : line("D4D4D4", 9525)}</c:spPr>${txPr(spec.font, { rot: o.rot })}` +
     `<c:crossAx val="${cross}"/><c:crosses val="${spec.valueReversed && !o.deleted ? "max" : "autoZero"}"/><c:auto val="1"/><c:lblAlgn val="ctr"/>` +
-    `<c:lblOffset val="100"/>${o.rot !== undefined ? '<c:tickLblSkip val="1"/>' : ""}<c:noMultiLvlLbl val="${multi ? 0 : 1}"/></c:catAx>`;
+    `<c:lblOffset val="100"/>${o.rot !== undefined ? `<c:tickLblSkip val="${o.skip || 1}"/>` : ""}<c:noMultiLvlLbl val="${multi ? 0 : 1}"/></c:catAx>`;
 }
 
 /** a continuous date axis: Excel's date axis, its labels as far apart as dateTicks found room for
  * @param {ChartSpec} spec @param {number} id @param {number} cross @param {{ deleted?: boolean, rot?: number }} o */
 function dateAxisXml(spec, id, cross, o) {
   const t = spec.dateTicks || { majorUnit: 1, majorTimeUnit: "years", numFmt: "yyyy" };
-  return `<c:dateAx><c:axId val="${id}"/><c:scaling><c:orientation val="minMax"/></c:scaling>` +
+  const d = spec.dateAxis;                                // panes of small multiples share one span (max before min)
+  const span = (d.max !== undefined ? `<c:max val="${d.max}"/>` : "") + (d.min !== undefined ? `<c:min val="${d.min}"/>` : "");
+  return `<c:dateAx><c:axId val="${id}"/><c:scaling><c:orientation val="minMax"/>${span}</c:scaling>` +
     `<c:delete val="${o.deleted ? 1 : 0}"/><c:axPos val="b"/>${o.deleted ? "" : title(spec.categoryTitle, spec.font, false)}` +
     `<c:numFmt formatCode="${esc(t.numFmt)}" sourceLinked="0"/><c:majorTickMark val="none"/><c:minorTickMark val="none"/>` +
     `<c:tickLblPos val="${o.deleted ? "none" : spec.valueReversed ? "nextTo" : "low"}"/><c:spPr>${spec.axisLine === false ? "<a:ln><a:noFill/></a:ln>" : line("D4D4D4", 9525)}</c:spPr>${txPr(spec.font, { rot: o.rot })}` +
@@ -8946,7 +9099,7 @@ function dateAxisXml(spec, id, cross, o) {
 function dateTicks(spec, axisPlot) {
   const d = spec.dateAxis;
   if (!d) return null;
-  const s = d.serials, first = s[0], last = s[s.length - 1];
+  const s = d.serials, first = d.min !== undefined ? d.min : s[0], last = d.max !== undefined ? d.max : s[s.length - 1];
   const month = v => { const t = new Date((v - 25569) * 86400000); return t.getUTCFullYear() * 12 + t.getUTCMonth(); };
   const months = month(last) - month(first), days = last - first;
   const charPx = ((spec.font && spec.font.size) || 9) * 4 / 3 * 0.55;          // average character of the label font
@@ -9009,7 +9162,7 @@ function valAxis(spec, id, cross, o = {}) {
     ? (fixed.max !== undefined ? `<c:max val="${fixed.max}"/>` : "") + (fixed.min !== undefined ? `<c:min val="${fixed.min}"/>` : "")
     : spec.includeZero === false || !o.values ? "" : zeroScaling(o.values);
   return `<c:valAx><c:axId val="${id}"/><c:scaling><c:orientation val="${o.reversed ? "maxMin" : "minMax"}"/>${scale}</c:scaling><c:delete val="${o.deleted ? 1 : 0}"/>` +
-    `<c:axPos val="${pos}"/>${grid}${title(o.title, spec.font, pos === "l" || pos === "r")}` +
+    `<c:axPos val="${pos}"/>${grid}${title(o.title, spec.font, (pos === "l" || pos === "r") && !o.titleFlat, !!o.titleFlat)}` +
     `<c:numFmt formatCode="${esc(o.tickFmt || axisFmt(o.numFmt || "General", o.values))}" sourceLinked="0"/><c:majorTickMark val="none"/>` +
     `<c:minorTickMark val="none"/><c:tickLblPos val="${o.hidden ? "none" : o.lowLabels ? "low" : "nextTo"}"/><c:spPr><a:ln><a:noFill/></a:ln></c:spPr>` +
     `${txPr(spec.font)}<c:crossAx val="${cross}"/><c:crosses val="${crosses}"/>` +
@@ -9067,24 +9220,30 @@ function xyFit(spec, plot) {
 }
 
 /**
- * Tableau's column headers stay horizontal and a name too long for its slot is cut short with "..": the
- * labels shown on a vertical chart's category axis, or null when every name fits (or the labels are rotated).
- * @param {ChartSpec} spec @param {{ w: number, h: number } | null} axisPlot
+ * Tableau's column headers stay horizontal while every name fits its slot; otherwise Tableau turns them to read
+ * upwards and, where even turned labels would overlap, shows every second (third …) one. The turn (degrees) and the
+ * label step for a vertical chart's category axis, or null when the labels stay as they are (or the workbook turns them).
+ * @param {ChartSpec} spec @param {{ w: number, h: number } | null} axisPlot @returns {{ rot: number, skip: number } | null}
  */
-function truncatedCategories(spec, axisPlot) {
+function categoryLabelFit(spec, axisPlot) {
   const levels = spec.categories ? spec.categories.levels : [];
-  if (!axisPlot || spec.barDir === "bar" || spec.categoryRotation || spec.categoryAxisHidden || levels.length !== 1 || !levels[0].length) return null;
+  if (!axisPlot || spec.barDir === "bar" || spec.categoryRotation || spec.categoryAxisHidden || spec.dateAxis ||
+      levels.length !== 1 || !levels[0].length) return null;
   const names = levels[0].map(c => String(c == null ? "" : c));
-  const charPx = ((spec.font && spec.font.size) || 9) * 4 / 3 * 0.5;      // average character of the label font
-  const fit = Math.max(4, Math.floor((axisPlot.w / names.length - 4) / charPx));
-  const shown = names.map(n => n.length > fit ? n.slice(0, Math.max(1, fit - 2)).trimEnd() + ".." : n);
-  return shown.some((s, i) => s !== names[i]) ? shown : null;
+  const fontPx = ((spec.font && spec.font.size) || 9) * 4 / 3;
+  const slot = axisPlot.w / names.length;
+  if (names.every(n => n.length * fontPx * 0.5 <= slot - 4)) return null;     // average character: half the font size
+  // numbers (bins, years) stay horizontal like an axis: every n-th, as far apart as the longest needs
+  if (names.every(n => /^-?[\d.,]+%?$/.test(n.trim()))) {
+    return { rot: 0, skip: Math.max(1, Math.ceil((Math.max(...names.map(n => n.length)) * fontPx * 0.55 + 10) / slot)) };
+  }
+  return { rot: -90, skip: Math.max(1, Math.ceil(fontPx * 1.4 / slot)) };      // a turned label's line, with spacing
 }
 
 /** @param {ChartSpec} spec @param {ChartRefs} refs @param {{ w: number, h: number } | null} [plot] plot area in px (manual layout)
  *  @param {{ w: number, h: number } | null} [axisPlot] approximate plot area of a chart with axes, for Tableau-like tick spacing */
 function plotAreaXml(spec, refs, plot = null, axisPlot = null) {
-  spec.categoryShown = spec.dateAxis ? null : truncatedCategories(spec, axisPlot);
+  spec.categoryFit = categoryLabelFit(spec, axisPlot);
   spec.dateTicks = dateTicks(spec, axisPlot);
   const k = spec.kind;
   if (k === "pie" || k === "doughnut") {
@@ -9198,9 +9357,13 @@ function plotAreaXml(spec, refs, plot = null, axisPlot = null) {
   }
   // a hidden value axis beside a second axis group is kept, not drawn: Excel would draw a deleted axis's series on the
   // other group's axis, losing the scale Tableau gives each axis
-  let axes = catAxis(spec, AX.cat, AX.val, { deleted: spec.categoryAxisHidden, rot: (spec.categoryRotation || 0) * 60000 }) +
-    valAxis(spec, AX.val, AX.cat, { title: spec.valueAxisHidden ? null : spec.valueTitle, numFmt: spec.numFmt, values: axisValues(false),
-                                    fixed, deleted: spec.valueAxisHidden && !hasSecondary, hidden: spec.valueAxisHidden && hasSecondary,
+  let axes = catAxis(spec, AX.cat, AX.val, { deleted: spec.categoryAxisHidden,
+                                     rot: (spec.categoryRotation || (spec.categoryFit ? spec.categoryFit.rot : 0)) * 60000, skip: spec.categoryFit ? spec.categoryFit.skip : 1 }) +
+    valAxis(spec, AX.val, AX.cat, { title: spec.rowTitle !== undefined ? spec.rowTitle : spec.valueAxisHidden ? null : spec.valueTitle,
+                                    titleFlat: spec.rowTitle !== undefined && !(spec.grid && spec.grid.rowVertical),
+                                    numFmt: spec.numFmt, values: axisValues(false), fixed,
+                                    deleted: spec.valueAxisHidden && !hasSecondary && spec.rowTitle === undefined,
+                                    hidden: spec.valueAxisHidden && (hasSecondary || spec.rowTitle !== undefined),
                                     majorUnit: unit, tickFmt: spec.valueAxisNumFmt, reversed: spec.valueReversed });
   if (hasSecondary) {
     axes += catAxis(spec, AX.cat2, AX.val2, { deleted: true }) +
@@ -9213,15 +9376,57 @@ function plotAreaXml(spec, refs, plot = null, axisPlot = null) {
   return xml + overlay + axes + overlayAxes;
 }
 
+/* small multiples: room round Tableau's pane grid for the headers and axes (px) */
+const GRID_TOP = 18, GRID_BOTTOM = 22, GRID_PAD = 1, GRID_OVERLAP = 14, GRID_OVERLAP_V = 10, GRID_AXIS = 34;
+
+/** the grid's left margin (px): the row headers (turned: one line high; else as wide as the longest, at most 120 px)
+ * and the value axis labels unless the workbook hides them @param {any} g spec.grid @param {ChartSpec} spec */
+function gridLeft(g, spec) {
+  const fontPx = ((spec.font && spec.font.size) || 9) * 4 / 3;
+  const head = !g.rowLen ? 0 : g.rowVertical ? fontPx + 6 : Math.min(120, g.rowLen * fontPx * 0.55 + 10);
+  return Math.round(head + (spec.valueAxisHidden ? 0 : GRID_AXIS) + 4);
+}
+
+/** a pane chart's margins round its plot area (px): headers and axes only on the grid's outer panes; inner edges reach
+ * into the neighbouring panes (the charts are see-through), so labels at a pane's edge keep their room and Excel never
+ * moves a plot area to fit them – every pane's plot stays exactly at its place in the grid
+ * @param {any} g spec.grid @param {ChartSpec} spec */
+function gridInset(g, spec) {
+  return { l: (g.col === 0 ? gridLeft(g, spec) : GRID_OVERLAP) + GRID_PAD, r: (g.col === g.cols - 1 ? 0 : GRID_OVERLAP) + GRID_PAD,
+           t: (g.row === 0 ? GRID_TOP : GRID_OVERLAP_V) + GRID_PAD, b: (g.row === g.rows - 1 ? GRID_BOTTOM : GRID_OVERLAP_V) + GRID_PAD };
+}
+
+/** a pane chart's frame inside its block (px): the panes share the block evenly, the outer ones also hold the
+ * headers and axes, so every plot area is the same size
+ * @param {any} g spec.grid @param {ChartSpec} spec @param {number} W @param {number} H */
+function gridFrame(g, spec, W, H) {
+  const GRID_LEFT = gridLeft(g, spec);
+  const pw = Math.max(12, (W - GRID_LEFT) / g.cols), ph = Math.max(12, (H - GRID_TOP - GRID_BOTTOM) / g.rows);
+  const x = g.col === 0 ? 0 : GRID_LEFT + g.col * pw - GRID_OVERLAP, y = g.row === 0 ? 0 : GRID_TOP + g.row * ph - GRID_OVERLAP_V;
+  const x2 = GRID_LEFT + (g.col + 1) * pw + (g.col === g.cols - 1 ? 0 : GRID_OVERLAP);
+  const y2 = GRID_TOP + (g.row + 1) * ph + (g.row === g.rows - 1 ? GRID_BOTTOM : GRID_OVERLAP_V);
+  return { x: Math.round(x), y: Math.round(y), w: Math.round(x2) - Math.round(x), h: Math.round(y2) - Math.round(y) };
+}
+
 /** chart part XML (xl/charts/chartN.xml)
  * @param {ChartSpec} spec @param {ChartRefs} refs
  * @param {{ widthPx?: number, heightPx?: number }} [size] the chart frame, for maps / packed bubbles
  * @returns {string} */
 function chartXml(spec, refs, size) {
+  // a pane of small multiples: the column's header above the top row, the row's header as the left column's axis
+  // title, value labels on the left column and the category axis on the bottom row only (Tableau's shared axes)
+  const g = spec.grid;
+  if (g) {
+    spec = { ...spec, legend: false, categoryTitle: "", background: null, categoryAxisHidden: spec.categoryAxisHidden || g.row !== g.rows - 1,
+             valueAxisHidden: spec.valueAxisHidden || g.col !== 0, valueTitle: null, rowTitle: g.col === 0 ? g.rowLabel : undefined };
+  }
   // no axes: the plot area fills the frame (room for the legend), so its size in px is known
   const frame = spec.axesHidden && spec.packed ? bubbleFrame(spec) : null;
   const plot = frame && { w: ((size && size.widthPx) || 600) * frame.w, h: ((size && size.heightPx) || 400) * frame.h };
-  const axisPlot = size && size.widthPx ? { w: size.widthPx * 0.85, h: (size.heightPx || 300) * 0.72 } : null;
+  const gi = g && gridInset(g, spec);
+  const axisPlot = !size || !size.widthPx ? null
+    : gi ? { w: size.widthPx - gi.l - gi.r, h: (size.heightPx || 300) - gi.t - gi.b }
+    : { w: size.widthPx * 0.85, h: (size.heightPx || 300) * 0.72 };
   const layout = frame
     ? `<c:layout><c:manualLayout><c:layoutTarget val="inner"/><c:xMode val="edge"/><c:yMode val="edge"/>` +
       `<c:x val="${frame.x}"/><c:y val="${frame.y}"/><c:w val="${frame.w}"/><c:h val="${frame.h}"/></c:manualLayout></c:layout>`
@@ -9247,11 +9452,29 @@ function chartXml(spec, refs, size) {
     plotLayout = `<c:layout><c:manualLayout><c:layoutTarget val="inner"/><c:xMode val="edge"/><c:yMode val="edge"/>` +
       `<c:x val="${box.x}"/><c:y val="${box.y}"/><c:w val="${box.w}"/><c:h val="${box.h}"/></c:manualLayout></c:layout>`;
   }
+  if (g) {
+    // every pane's plot area at the same place inside its chart, so the grid lines up like Tableau's panes
+    const W = (size && size.widthPx) || 200, H = (size && size.heightPx) || 150, i = gridInset(g, spec);
+    const f = v => Math.max(0, Math.min(1, v)).toFixed(4);
+    plotLayout = `<c:layout><c:manualLayout><c:layoutTarget val="inner"/><c:xMode val="edge"/><c:yMode val="edge"/>` +
+      `<c:x val="${f(i.l / W)}"/><c:y val="${f(i.t / H)}"/><c:w val="${f((W - i.l - i.r) / W)}"/><c:h val="${f((H - i.t - i.b) / H)}"/></c:manualLayout></c:layout>`;
+    // the row's header on one line left of its pane (turned or not, as in the workbook), cut short with ".." like Tableau's
+    if (g.col === 0 && spec.rowTitle) {
+      const charPx = (spec.font.size || 9) * 4 / 3 * 0.55;
+      const room = Math.floor((g.rowVertical ? H - i.t - i.b : i.l - (spec.valueAxisHidden ? 0 : GRID_AXIS) - 8) / charPx);
+      if (spec.rowTitle.length > room) spec.rowTitle = spec.rowTitle.slice(0, Math.max(1, room - 2)).trimEnd() + "..";
+    }
+    if (g.row === 0 && g.colLabel) {
+      const tw = String(g.colLabel).length * (spec.font.size || 9) * 4 / 3 * 0.55 + 8;
+      titleXml = title(g.colLabel, spec.font, false).replace("<c:overlay", `<c:layout><c:manualLayout><c:xMode val="edge"/><c:yMode val="edge"/>` +
+        `<c:x val="${f((i.l + (W - i.l - i.r) / 2 - tw / 2) / W)}"/><c:y val="0"/></c:manualLayout></c:layout><c:overlay`);
+    }
+  }
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n` +
     `<c:chartSpace xmlns:c="${NS.c}" xmlns:a="${NS.a}" xmlns:r="${NS.r}">` +
     `<c:date1904 val="0"/><c:lang val="en-US"/><c:roundedCorners val="0"/>` +
     `<c:chart>${titleXml}<c:autoTitleDeleted val="${titleXml ? 0 : 1}"/><c:plotArea>${plotLayout}${plotAreaXml(spec, refs, plot, axisPlot)}` +
-    `<c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr></c:plotArea>${legend}` +
+    `<c:spPr><a:noFill/>${g ? line("D9D9D9", 6350) : "<a:ln><a:noFill/></a:ln>"}</c:spPr></c:plotArea>${legend}` +
     `<c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/></c:chart>` +
     `<c:spPr>${spec.background === null ? "<a:noFill/>" : solid(spec.background || "FFFFFF")}<a:ln><a:noFill/></a:ln></c:spPr>${txPr(spec.font)}` +
     `<c:printSettings><c:headerFooter/><c:pageMargins b="0.75" l="0.7" r="0.7" t="0.75" header="0.3" footer="0.3"/>` +
@@ -10723,7 +10946,7 @@ setTableVisibleRows(placedItems);
         reserveGraphicBlock(item);
         item.visualModel.status = "success";
         item.visualModel.statusReason = `native Excel ${[...new Set(specs.map(s => s.kind))].join("/")} chart` +
-          (specs.length > 1 ? ` (${specs.length} panes)` : "");
+          (specs.length > 1 ? ` (${specs.length} panes${specs[0].grid ? ` in a ${specs[0].grid.rows} × ${specs[0].grid.cols} grid` : ""})` : "");
         if (status) { status.status = "success"; status.reason = item.visualModel.statusReason; }
         continue;
       }
@@ -11056,6 +11279,14 @@ setTableVisibleRows(placedItems);
           let w = 0, h = 0;
           for (let c = job.item.gridCol; c < job.item.gridCol + job.item.gridW; c++) w += colPx(c);
           for (let r = job.top; r < job.item.gridRow + job.item.allocatedRows; r++) h += rowPx(r);
+          if (job.spec.grid) {
+            // small multiples: each pane at its place in Tableau's grid
+            const f = gridFrame(job.spec.grid, job.spec, w, h);
+            const at = nativeAnchor(job.item.gridCol, job.top, f.x, f.y, colPx, rowPx);
+            Object.assign(job, { col: at.nativeCol, colOffPx: at.nativeColOff / 9525, row: at.nativeRow, rowOffPx: at.nativeRowOff / 9525,
+                                 widthPx: Math.max(12, f.w), heightPx: Math.max(12, f.h) });
+            return;
+          }
           job.widthPx = Math.max(40, w);
           if (job.item.pairedCard) { job.colOffPx = 2; job.widthPx = Math.max(40, w - 4); }     // the card's white edges
           // stacked panes split the block's real height (rows may be taller, shorter or collapsed), each from its own spot
