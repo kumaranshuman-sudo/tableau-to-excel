@@ -219,7 +219,8 @@ export function buildLayoutMap(dashboardObjects, titleMap = {}) {
     let displayName = "";
     if (kind === "text" || kind === "image") displayName = "";
     else if (kind === "worksheet") {
-      displayName = titleMap[obj.name]
+      // a title written with Tableau's <Sheet Name> token names the sheet itself
+      displayName = (titleMap[obj.name] && titleMap[obj.name].replace(/<sheet name>/gi, obj.name))
                  || (obj.title && obj.title.trim() ? obj.title.trim() : null)
                  || obj.name;
     } else {
