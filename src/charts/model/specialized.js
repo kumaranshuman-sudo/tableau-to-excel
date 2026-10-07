@@ -214,6 +214,17 @@ export function tvWaterfallSpec(ctx) {
     { name: label + " (increase)", type: "bar", values: up, color: markColor, pointColors: stepColors, labels: labels && !above },
     { name: label + " (decrease)", type: "bar", values: down, color: markColor, pointColors: stepColors, labels: labels && !above, labelNumFmt: downFmt }
   ];
+  // Analysis → Totals → Show Grand Totals on the category shelf: Tableau ends with a full bar from zero to the
+  // final running total (drawn in grey)
+  const catShelf = valueShelf === "rows" ? "cols" : "rows";
+  const totals = vm.fmt.sheetModel && vm.fmt.sheetModel.grandTotals && vm.fmt.sheetModel.grandTotals[catShelf];
+  if (totals && running.length) {
+    const n = running.length;
+    series.forEach(s => { s.values = [...s.values, null]; if (s.pointColors) s.pointColors = [...s.pointColors, null]; });
+    series.push({ name: "Grand Total", type: "bar", values: [...Array(n).fill(null), prev], color: "9E9E9E", labels: labels && !above });
+    cats.levels = cats.levels.map((lv, i) => [...lv, i === 0 ? "Grand Total" : ""]);
+    ends.push(prev); labelValues.push(labelCi === measure.ci ? prev : null);
+  }
   if (above) {
     series.push({ name: label + " (labels)", type: "line", values: ends, color: null, line: false, marker: false, labels: true,
                   labelTexts: labelValues.map(v => v === null ? "" : tfFormatNumber(v, labelFmt)) });

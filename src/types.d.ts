@@ -139,6 +139,8 @@ interface SheetModel {
   style: ParsedStyle;
   rows: FieldRef[];
   cols: FieldRef[];
+  /** Analysis → Totals: grand totals shown along the Rows / Columns shelf */
+  grandTotals?: { rows: boolean; cols: boolean };
   panes: Pane[];
   fieldRefs: FieldRef[];
   manualSorts?: { field: FieldRef; direction: string; order: string[] }[];

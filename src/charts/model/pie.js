@@ -194,6 +194,10 @@ export function buildPieSpec(fmt, summary, opts = {}) {
   // this layer's rows are the ones where its own axis measure has a value
   const axisCol = fmt.axisRefs().length === 1 ? colFor(fmt.axisRefs()[0]) : -1;
   if (axisCol >= 0) marks = marks.filter(({ r }) => !tfIsNull(r[axisCol]));
+  // both layers on one axis measure (MIN(0) twice): the other layer's rows are the ones without this layer's
+  // colour member – a donut's hole total comes back as Country = Null
+  const enc0 = fmt.colorEncoding(), ci0 = enc0 && !enc0.continuous ? colFor(enc0.ref) : -1;
+  if (axisCol >= 0 && ci0 >= 0 && marks.some(({ r }) => !tfIsNull(r[ci0]))) marks = marks.filter(({ r }) => !tfIsNull(r[ci0]));
   if (vi >= 0) marks = marks.filter(({ r }) => { const v = tfDvNum(r[vi]); return v !== null && v > 0; });   // Tableau drops null / ≤ 0 wedges
   if (!marks.length) return null;
 
@@ -286,7 +290,11 @@ export function buildHoleSpec(fmt, pie) {
   const shown = fmt.markLabelsShown(), tpl = fmt.labelRunsTemplate();
   const ax = fmt.axisRefs()[0];
   const ai = ax ? pie.columns.findIndex(c => c.ref && tfSameField(c.ref, ax)) : -1;
-  const own = new Map(ai >= 0 ? pie.data.filter(r => !tfIsNull(r[ai])).map(r => [pie.paneOf(r), r]) : []);
+  // the hole's own row: one the slices don't use (on one shared axis measure every row has an axis value)
+  const sliceRows = new Set(pie.points.map(p => p.row));
+  const axisRows = ai >= 0 ? pie.data.filter(r => !tfIsNull(r[ai])) : [];
+  const spare = axisRows.filter(r => !sliceRows.has(pie.data.indexOf(r)));
+  const own = new Map((spare.length ? spare : axisRows).map(r => [pie.paneOf(r), r]));
   const valueOf = pts => ref => {
     const k = pie.columns.findIndex(c => c.ref && tfSameField(c.ref, ref));
     if (k < 0) return "";

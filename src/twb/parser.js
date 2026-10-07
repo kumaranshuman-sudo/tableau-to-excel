@@ -170,7 +170,7 @@ function tfCalcInfo(calc) {
 
 /* Raise when the parser reads something new: a workbook model remembered by an older version is then
    parsed again from its stored XML (ui/workbook-store.js), so an update reaches workbooks loaded before it. */
-export const FORMAT_MODEL_VERSION = 4;
+export const FORMAT_MODEL_VERSION = 5;
 
 /** @param {string} xmlString the .twb XML @returns {FormatModel} */
 export function parseTableauFormatting(xmlString) {
@@ -220,6 +220,9 @@ export function parseTableauFormatting(xmlString) {
       style: tfParseStyle(table && tfKid(table, "style")),
       rows: tfExtractRefs(table && tfKid(table, "rows") && tfKid(table, "rows").textContent),
       cols: tfExtractRefs(table && tfKid(table, "cols") && tfKid(table, "cols").textContent),
+      // Analysis → Totals → Show Row / Column Grand Totals (<rows total='true'> / <cols total='true'>)
+      grandTotals: { rows: !!(table && tfKid(table, "rows") && tfKid(table, "rows").getAttribute("total") === "true"),
+                     cols: !!(table && tfKid(table, "cols") && tfKid(table, "cols").getAttribute("total") === "true") },
       panes: [], fieldRefs: []
     };
     const view = table && tfKid(table, "view");
